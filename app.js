@@ -1198,8 +1198,8 @@ window.MiRutina = window.MiRutina || {};
             ui.el("p", {
               class: "goal-numbers",
               text: t("dash.goals.numbers", {
-                progress: goal.progress,
-                target: goal.target,
+                progress: formatAmount(goal.progress),
+                target: formatAmount(goal.target),
                 percent: percent,
               }),
             }),
@@ -1474,8 +1474,8 @@ window.MiRutina = window.MiRutina || {};
           color: goal.color,
         }),
         ui.el("div", { class: "goal-stats" }, [
-          goalStat(t("goals.stat.progress"), String(goal.progress)),
-          goalStat(t("goals.stat.target"), String(goal.target)),
+          goalStat(t("goals.stat.progress"), formatAmount(goal.progress)),
+          goalStat(t("goals.stat.target"), formatAmount(goal.target)),
           goalStat(t("goals.stat.percent"), i18n.percent(percent)),
         ]),
         ui.el("p", {
@@ -1629,7 +1629,7 @@ window.MiRutina = window.MiRutina || {};
           "data-goal-id": goal.id,
           "data-adjust": String(delta),
           "aria-label": t(delta > 0 ? "goals.manual.add" : "goals.manual.subtract", {
-            delta: Math.abs(delta),
+            value: formatAmount(Math.abs(delta)),
             title: goal.title,
           }),
           text: delta > 0 ? "+" + delta : "−" + Math.abs(delta),
@@ -1644,14 +1644,21 @@ window.MiRutina = window.MiRutina || {};
     var freeInput = ui.el("input", {
       id: "manual-" + goal.id,
       name: "manual-" + goal.id,
-      type: "number",
-      step: 1,
-      inputmode: "numeric",
+      type: "text",
+      inputmode: "decimal",
       class: "goals-free-input",
       value: value,
+      placeholder: formatAmount(1000000),
       "data-draft": "manual-" + goal.id,
     });
     freeInput.addEventListener("input", function () {
+      // El texto se deja tal cual se teclea; el formato llega al salir del campo.
+      manualValues[goal.id] = freeInput.value;
+    });
+    freeInput.addEventListener("blur", function () {
+      var delta = parseAmount(freeInput.value);
+      if (Number.isNaN(delta)) return;
+      freeInput.value = formatAmount(delta);
       manualValues[goal.id] = freeInput.value;
     });
     var freeForm = ui.el(
@@ -1688,8 +1695,8 @@ window.MiRutina = window.MiRutina || {};
         ui.el("span", {
           class: "goals-manual-numbers",
           text: t("goals.manual.numbers", {
-            progress: goal.progress,
-            target: goal.target,
+            progress: formatAmount(goal.progress),
+            target: formatAmount(goal.target),
             percent: Math.round(domain.goalPercent(goal)),
           }),
         }),
@@ -1712,7 +1719,12 @@ window.MiRutina = window.MiRutina || {};
   /** Valor libre con signo validado junto al campo (entero ≠ 0). */
   function submitManualFree(goalId) {
     var text = manualValues[goalId] || "";
-    var delta = text.trim() === "" ? NaN : Number(text);
+    var delta = parseAmount(text);
+    if (Number.isNaN(delta)) {
+      manualErrors[goalId] = t("goals.form.error.number", { example: formatAmount(1000000) });
+      rerender();
+      return;
+    }
     var check = domain.validateManualDelta(delta);
     if (!check.ok) {
       manualErrors[goalId] = check.message;
@@ -1754,8 +1766,8 @@ window.MiRutina = window.MiRutina || {};
       title: goal.title,
       description: goal.description,
       year: String(goal.year),
-      target: String(goal.target),
-      progress: String(goal.progress),
+      target: formatAmount(goal.target),
+      progress: formatAmount(goal.progress),
       color: goal.color,
       links: goal.linkedRoutineIds.slice(),
       errors: {},
@@ -1775,6 +1787,35 @@ window.MiRutina = window.MiRutina || {};
   /** Vacío → NaN para que el validador de dominio emita su mensaje. */
   function parseGoalInteger(text) {
     return String(text).trim() === "" ? NaN : Number(text);
+  }
+
+  /**
+   * Cantidad tolerante con separador de millar (punto, coma o espacio): se ignora
+   * al parsear ("1.000.000", "1,000,000" y "1000000" → 1000000). Un separador
+   * fuera de posición de millar ("1,5") es error: nunca se lee como decimal.
+   * @returns {number} entero seguro o NaN si la entrada no es válida.
+   */
+  function parseAmount(text) {
+    var raw = String(text == null ? "" : text).trim().replace(/\s+/g, " ");
+    var sign = "";
+    if (raw.charAt(0) === "+" || raw.charAt(0) === "-") {
+      sign = raw.charAt(0);
+      raw = raw.slice(1);
+    }
+    if (!/^\d+([., ]\d+)*$/.test(raw)) return NaN;
+    var groups = raw.split(/[., ]/);
+    for (var index = 1; index < groups.length; index += 1) {
+      // Separador en posición de millar: lo que viene detrás va en bloques de 3.
+      if (groups[index].length % 3 !== 0) return NaN;
+    }
+    var value = Number(sign + groups.join(""));
+    return Number.isSafeInteger(value) ? value : NaN;
+  }
+
+  /** Cantidad con separador de millar del idioma activo ("1.000.000" / "1,000,000"). */
+  function formatAmount(value) {
+    var sign = value < 0 ? "-" : "";
+    return sign + i18n.number(Math.abs(value));
   }
 
   function buildGoalForm() {
@@ -1810,23 +1851,21 @@ window.MiRutina = window.MiRutina || {};
     var targetInput = ui.el("input", {
       id: "goal-target",
       name: "goal-target",
-      type: "number",
-      min: 1,
-      step: 1,
-      inputmode: "numeric",
+      type: "text",
+      inputmode: "decimal",
       class: "rf-input",
       value: s.target,
+      placeholder: formatAmount(1000000),
       "aria-label": t("goals.form.label.target"),
     });
     var progressInput = ui.el("input", {
       id: "goal-progress",
       name: "goal-progress",
-      type: "number",
-      min: 0,
-      step: 1,
-      inputmode: "numeric",
+      type: "text",
+      inputmode: "decimal",
       class: "rf-input",
       value: s.progress,
+      placeholder: formatAmount(1000000),
       "aria-label": t("goals.form.label.progress"),
     });
     var colorSwatch = ui.el("input", {
@@ -1868,6 +1907,8 @@ window.MiRutina = window.MiRutina || {};
     bindGoalFormInput(yearInput, "year");
     bindGoalFormInput(targetInput, "target");
     bindGoalFormInput(progressInput, "progress");
+    bindAmountField(targetInput, "target");
+    bindAmountField(progressInput, "progress");
     bindGoalFormInput(colorText, "color");
     colorSwatch.addEventListener("change", function () {
       // El picker siempre emite un hex válido; se refleja en la entrada manual.
@@ -1964,6 +2005,21 @@ window.MiRutina = window.MiRutina || {};
     });
   }
 
+  /**
+   * Cifra de meta/progreso: se teclea libre (con separadores) y al salir se
+   * reescribe con el formato del idioma; lo inválido queda tal cual hasta
+   * que el usuario lo corrija.
+   */
+  function bindAmountField(control, key) {
+    control.addEventListener("blur", function () {
+      var value = parseAmount(control.value);
+      if (Number.isNaN(value)) return;
+      control.value = formatAmount(value);
+      goalFormState[key] = control.value;
+      refreshGoalFormErrors();
+    });
+  }
+
   /** Multiselección de rutinas vinculadas. */
   function buildGoalLinksPicker() {
     var grid = ui.el("div", { class: "goal-links-grid", role: "group", "aria-labelledby": "goal-links-legend" });
@@ -2043,11 +2099,20 @@ window.MiRutina = window.MiRutina || {};
     }
     // Aísla cada campo: meta fija válida para probar solo el progreso y
     // progreso 0 (siempre válido) para probar solo la meta.
-    var targetResult = domain.validateGoal({ target: parseGoalInteger(s.target), progress: 0 });
-    if (!targetResult.ok) {
-      errors.target = targetResult.message;
+    var target = parseAmount(s.target);
+    if (Number.isNaN(target)) {
+      errors.target = t("goals.form.error.number", { example: formatAmount(1000000) });
     } else {
-      var progressResult = domain.validateGoal({ target: 1, progress: parseGoalInteger(s.progress) });
+      var targetResult = domain.validateGoal({ target: target, progress: 0 });
+      if (!targetResult.ok) {
+        errors.target = targetResult.message;
+      }
+    }
+    var progress = parseAmount(s.progress);
+    if (Number.isNaN(progress)) {
+      errors.progress = t("goals.form.error.number", { example: formatAmount(1000000) });
+    } else {
+      var progressResult = domain.validateGoal({ target: 1, progress: progress });
       if (!progressResult.ok) {
         errors.progress = progressResult.message;
       }
@@ -2069,8 +2134,8 @@ window.MiRutina = window.MiRutina || {};
       title: s.title.trim(),
       description: s.description.trim(),
       year: parseGoalInteger(s.year),
-      target: parseGoalInteger(s.target),
-      progress: parseGoalInteger(s.progress),
+      target: parseAmount(s.target),
+      progress: parseAmount(s.progress),
       color: s.color.toUpperCase(),
       linkedRoutineIds: s.links.slice(),
     };
@@ -2232,7 +2297,7 @@ window.MiRutina = window.MiRutina || {};
     }
     return t("goals.manual.adjusted", {
       title: title,
-      after: after,
+      after: formatAmount(after),
       delta: i18n.signedNumber(delta),
     });
   }

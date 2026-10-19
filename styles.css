@@ -834,7 +834,8 @@ svg {
 }
 
 .rf-input::placeholder,
-.note-textarea::placeholder {
+.note-textarea::placeholder,
+.goals-free-input::placeholder {
   color: var(--texto-tenue);
 }
 
@@ -855,7 +856,8 @@ svg {
 .rf-input[aria-invalid="true"],
 .rf-number[aria-invalid="true"],
 .color-text[aria-invalid="true"],
-.note-textarea[aria-invalid="true"] {
+.note-textarea[aria-invalid="true"],
+.goals-free-input[aria-invalid="true"] {
   border-color: var(--peligro);
 }
 

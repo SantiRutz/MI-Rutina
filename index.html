@@ -9,6 +9,10 @@
     <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png" />
     <link rel="icon" type="image/png" sizes="512x512" href="icons/icon-512.png" />
 
+    <!-- PWA ligera: manifest para instalar; el offline lo resuelve service-worker.js. -->
+    <link rel="manifest" href="manifest.json" />
+    <meta name="theme-color" content="#171717" />
+
     <link rel="stylesheet" href="styles.css" />
 
     <!-- tema e idioma antes del primer pintado, sin parpadeo. -->
@@ -133,5 +137,18 @@
         <span id="footer-note">MiRutina © 2026 — Proyecto personal</span>
       </p>
     </footer>
+
+    <!-- Modo offline: service worker solo en http(s); en file:// no se registra. -->
+    <script>
+      (function () {
+        if (!/^https?:$/.test(location.protocol)) return;
+        if (!("serviceWorker" in navigator)) return;
+        window.addEventListener("load", function () {
+          navigator.serviceWorker.register("service-worker.js").catch(function () {
+            /* sin service worker la app sigue funcionando igual */
+          });
+        });
+      })();
+    </script>
   </body>
 </html>

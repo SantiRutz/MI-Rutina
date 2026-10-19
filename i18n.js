@@ -432,6 +432,7 @@
       "goals.form.error.target": "La meta debe ser un número entero mayor que 0.",
       "goals.form.error.progress": "El progreso inicial debe ser un número entero mayor o igual a 0.",
       "goals.form.error.manualDelta": "Introduce un número entero distinto de cero.",
+      "goals.form.error.number": "Introduce un número entero; puedes usar separador de miles ({example}).",
       "goals.delete.title": "Eliminar objetivo",
       "goals.delete.intro": "Vas a eliminar {name}.",
       "goals.delete.body":
@@ -985,6 +986,7 @@
       "goals.form.error.target": "The target must be an integer greater than 0.",
       "goals.form.error.progress": "The initial progress must be an integer greater than or equal to 0.",
       "goals.form.error.manualDelta": "Enter an integer other than zero.",
+      "goals.form.error.number": "Enter an integer; you can use a thousands separator ({example}).",
       "goals.delete.title": "Delete goal",
       "goals.delete.intro": "You're about to delete {name}.",
       "goals.delete.body":
@@ -1304,7 +1306,11 @@
     var digits = decimals == null ? 1 : decimals;
     var rounded = round(Number(value) || 0, digits);
     if (rounded === 0) return "0";
-    return (rounded > 0 ? "+" : "−") + number(Math.abs(rounded), digits);
+    // Enteros sin decimales ("+5"), decimales con su cifra ("+16,7").
+    var magnitude = Number.isInteger(rounded)
+      ? number(Math.abs(rounded), 0)
+      : number(Math.abs(rounded), digits);
+    return (rounded > 0 ? "+" : "−") + magnitude;
   }
 
   /** Porcentaje entero: "75%". */

@@ -829,10 +829,10 @@
 
   /** Meta entera > 0 y progreso inicial entero ≥ 0 (se permite meta < progreso). */
   function validateGoal(input) {
-    if (!Number.isInteger(input.target) || input.target <= 0) {
+    if (!Number.isSafeInteger(input.target) || input.target <= 0) {
       return { ok: false, message: t("goals.form.error.target") };
     }
-    if (!Number.isInteger(input.progress) || input.progress < 0) {
+    if (!Number.isSafeInteger(input.progress) || input.progress < 0) {
       return { ok: false, message: t("goals.form.error.progress") };
     }
     return { ok: true, value: input };
@@ -840,7 +840,7 @@
 
   /** Campo de valor libre con signo del ajuste manual (entero distinto de 0). */
   function validateManualDelta(delta) {
-    if (!Number.isInteger(delta) || delta === 0) {
+    if (!Number.isSafeInteger(delta) || delta === 0) {
       return { ok: false, message: t("goals.form.error.manualDelta") };
     }
     return { ok: true, value: delta };
