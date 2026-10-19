@@ -3,13 +3,20 @@
  * Helpers DOM (con escape), navbar, toasts aria-live, diálogo propio con
  * foco atrapado, campos con error, checkbox accesible, empty-states,
  * tabs, reveal y restauración de contexto. Sin cálculos de
- * negocio ni localStorage.
+ * negocio ni localStorage. Los textos propios por defecto se traducen con
+ * MiRutina.i18n; los que llegan por opciones los traduce quien llama.
  */
 "use strict";
 
 window.MiRutina = window.MiRutina || {};
 
 (function (MiRutina) {
+  var i18n = MiRutina.i18n;
+
+  function t(key, params) {
+    return i18n.t(key, params);
+  }
+
   /** 4 s visibles (mínimo 3 s). */
   var TOAST_DURATION_MS = 4000;
 
@@ -200,6 +207,11 @@ window.MiRutina = window.MiRutina || {};
     ],
     lock: [{ rect: [4, 10.5, 16, 10.5, 3] }, { d: "M8 10.5V7a4 4 0 0 1 8 0v3.5" }],
     sparkle: [{ d: "M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z" }],
+    shield: [
+      { d: "M12 2.8l7.2 2.9v5.4c0 4.6-3 8.4-7.2 10.1-4.2-1.7-7.2-5.5-7.2-10.1V5.7z" },
+    ],
+    "trend-up": [{ d: "M3 17l6-6 4 4 8-8" }, { d: "M15 7h6v6" }],
+    "trend-down": [{ d: "M3 7l6 6 4-4 8 8" }, { d: "M15 17h6v-6" }],
   };
 
   /**
@@ -333,7 +345,7 @@ window.MiRutina = window.MiRutina || {};
         el("button", {
           type: "button",
           class: "toast-close",
-          "aria-label": "Cerrar aviso",
+          "aria-label": t("common.toast.close"),
           text: "✕",
           onclick: function () {
             dismissToast(id);
@@ -417,19 +429,19 @@ window.MiRutina = window.MiRutina || {};
    * foco devuelto al cerrar. Apila diálogos; Escape
    * cierra solo el superior.
    * @param {Object} [options]
-   * @param {string} [options.title="Confirmar"]
+   * @param {string} [options.title] Por defecto, "Confirmar"/"Confirm".
    * @param {string|Node} [options.body] Cadenas van como texto (sin HTML crudo).
-   * @param {string} [options.confirmLabel="Confirmar"]
-   * @param {string} [options.cancelLabel="Cancelar"]
+   * @param {string} [options.confirmLabel] Por defecto, "Confirmar"/"Confirm".
+   * @param {string} [options.cancelLabel] Por defecto, "Cancelar"/"Cancel".
    * @param {"default"|"danger"} [options.tone="default"]
    * @returns {Promise<boolean>} true al confirmar, false al cancelar.
    */
   function confirmDialog(options) {
     options = options || {};
-    var title = options.title || "Confirmar";
+    var title = options.title || t("dialog.title");
     var body = options.body;
-    var confirmLabel = options.confirmLabel || "Confirmar";
-    var cancelLabel = options.cancelLabel || "Cancelar";
+    var confirmLabel = options.confirmLabel || t("common.confirm");
+    var cancelLabel = options.cancelLabel || t("common.cancel");
     var tone = options.tone === "danger" ? "danger" : "default";
 
     return new Promise(function (resolve) {
@@ -629,7 +641,7 @@ window.MiRutina = window.MiRutina || {};
    * Barra `role="progressbar"` con aria-label y fill animado (brillo 2 s).
    * @param {Object} [options]
    * @param {number} [options.value=0] Porcentaje; se satura en 0–100.
-   * @param {string} [options.label="Progreso"] Nombre accesible.
+   * @param {string} [options.label] Nombre accesible (por defecto, "Progreso"/"Progress").
    * @param {"sm"|"lg"} [options.size="sm"] 8 px en tarjetas, 16 px en resúmenes.
    * @param {string} [options.color] Color CSS del relleno (por defecto acento).
    * @returns {HTMLElement}
@@ -653,7 +665,7 @@ window.MiRutina = window.MiRutina || {};
       {
         class: "progress-track progress-" + (options.size === "lg" ? "lg" : "sm"),
         role: "progressbar",
-        "aria-label": options.label || "Progreso",
+        "aria-label": options.label || t("common.progress"),
         "aria-valuemin": "0",
         "aria-valuemax": "100",
         "aria-valuenow": String(Math.round(clamped)),
@@ -722,7 +734,7 @@ window.MiRutina = window.MiRutina || {};
     var list = el("div", {
       class: "tablist",
       role: "tablist",
-      "aria-label": options.ariaLabel || "Filtros",
+      "aria-label": options.ariaLabel || t("common.filters"),
       onkeydown: function (event) {
         var index = items.findIndex(function (item) {
           return item.id === value;

@@ -404,6 +404,53 @@ svg {
   transform: translateY(0);
 }
 
+/* Botón único de idioma: glass con borde degradado aurora; ofrece el idioma destino. */
+.lang-switch {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-width: 58px;
+  height: 40px;
+  padding: 0 14px;
+  border: 1px solid transparent;
+  border-radius: var(--radio-full);
+  background:
+    linear-gradient(var(--superficie), var(--superficie)) padding-box,
+    var(--grad-borde) border-box;
+  color: var(--texto);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  cursor: pointer;
+  transition: background var(--transicion), box-shadow var(--transicion),
+    transform var(--transicion);
+}
+
+.lang-switch:hover {
+  background:
+    linear-gradient(var(--primario-tinta), var(--primario-tinta)) padding-box,
+    var(--grad-acento) border-box;
+  box-shadow: var(--glow-foco);
+  transform: translateY(-1px);
+}
+
+.lang-switch:active {
+  transform: translateY(0) scale(0.97);
+}
+
+.lang-switch:focus-visible {
+  outline: 2px solid var(--primario-claro);
+  outline-offset: 2px;
+  box-shadow: var(--glow-foco);
+}
+
+.lang-switch-icon {
+  flex: none;
+  opacity: 0.9;
+}
+
 /* ============================================================
    Layout base
    ============================================================ */
@@ -3583,4 +3630,623 @@ svg {
 
 .rt-meta .pill {
   margin-left: var(--gap-sm);
+}
+
+/* ============================================================
+   Tanda 1: escudo de racha, tiempo invertido y modo foco
+   ============================================================ */
+
+/* Pill de escudos (dashboard e historial): días libres que no rompen la racha. */
+.pill-shield {
+  background: var(--info-tinta);
+  border: 1px solid rgba(34, 211, 238, 0.45);
+  color: var(--texto);
+}
+
+/* Contador de escudos del resumen semanal del historial. */
+.hist-summary-shields {
+  margin-top: var(--gap-sm);
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 13px;
+  color: var(--texto-suave);
+}
+
+/* Fila de escudo dentro de la tarjeta de día. */
+.hist-shield-row {
+  padding: var(--gap-md) var(--gap-lg);
+  border-top: 1px solid var(--borde-suave);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--gap-sm);
+  flex-wrap: wrap;
+}
+
+/* `--texto-suave` (y no `--texto-tenue`) para que el aviso del cupo llegue a AA en tema claro. */
+.hist-shield-left {
+  font-size: 12.5px;
+  color: var(--texto-suave);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Tiempo invertido de por vida en la tarjeta de rutina. */
+.rt-meta {
+  flex-wrap: wrap;
+}
+
+.rt-lifetime {
+  margin-left: auto;
+  background: var(--primario-tinta);
+  border: 1px solid var(--borde-boton);
+  color: var(--texto);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Modo foco del registro. */
+.log-focus {
+  padding: var(--gap-lg);
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-sm);
+}
+
+.log-focus-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--gap-md);
+  flex-wrap: wrap;
+}
+
+.log-focus-counter {
+  padding: 3px 10px;
+  border-radius: var(--radio-full);
+  background: var(--superficie-2);
+  color: var(--texto-suave);
+  font-size: 12.5px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Aviso del modo foco: `--texto-suave` para cumplir AA en tema claro. */
+.log-focus-hint {
+  font-size: 13px;
+  color: var(--texto-suave);
+}
+
+.log-focus-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--gap-sm);
+  margin-top: var(--gap-xs);
+}
+
+.focus-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border: 1px solid var(--borde);
+  border-radius: var(--radio-full);
+  background: var(--superficie-2);
+  color: var(--texto-suave);
+  font-size: 13.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color var(--transicion), color var(--transicion),
+    box-shadow var(--transicion);
+}
+
+.focus-chip:hover:not(:disabled) {
+  border-color: var(--borde-boton);
+  color: var(--texto);
+}
+
+.focus-chip:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.focus-chip-on {
+  background: var(--primario-tinta-fuerte);
+  border-color: var(--borde-boton);
+  color: var(--texto);
+  box-shadow: var(--glow-pill);
+}
+
+.focus-chip-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex: none;
+}
+
+/* Tiempo acumulado por rutina en la tabla de estadísticas. */
+.stats-table-lifetime {
+  color: var(--texto-suave);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ============================================================
+   Tanda 2: comparativas, registro retroactivo y recordatorio de backup
+   ============================================================ */
+
+/* Deltas de las comparativas: en claro hacen falta tonos más oscuros
+   que los de estado para llegar a AA como texto. */
+:root {
+  --cmp-mejora: var(--exito);
+  --cmp-empeora: var(--peligro);
+  --cal-shield: var(--info);
+}
+
+[data-theme="light"] {
+  --cmp-mejora: #0f7a4a;
+  --cmp-empeora: #b3261e;
+  --cal-shield: #0e7490;
+}
+
+/* ---- Comparativas periodo vs. periodo ---- */
+
+.cmp-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-md);
+}
+
+.cmp-hint {
+  font-size: 13px;
+  color: var(--texto-suave);
+}
+
+.cmp-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--gap-md);
+}
+
+@media (min-width: 900px) {
+  .cmp-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.cmp-card {
+  padding: var(--gap-lg);
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-md);
+  min-width: 0;
+}
+
+.cmp-head {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.cmp-title {
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.cmp-subtitle {
+  display: flex;
+  align-items: center;
+  gap: var(--gap-sm);
+  flex-wrap: wrap;
+  font-size: 13px;
+  color: var(--texto-suave);
+}
+
+.cmp-pill {
+  flex: none;
+}
+
+.cmp-note,
+.cmp-empty {
+  font-size: 13px;
+  color: var(--texto-suave);
+}
+
+.cmp-empty {
+  padding: var(--gap-md) 0;
+}
+
+.cmp-list {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.cmp-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 2px var(--gap-sm);
+  padding: 9px 0;
+  border-top: 1px solid var(--borde-suave);
+}
+
+.cmp-row:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.cmp-label {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--texto-suave);
+}
+
+.cmp-values {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--gap-sm);
+  justify-self: end;
+  white-space: nowrap;
+}
+
+.cmp-current {
+  font-size: 15px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+
+.cmp-delta {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 13px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.cmp-delta-up {
+  color: var(--cmp-mejora);
+}
+
+.cmp-delta-down {
+  color: var(--cmp-empeora);
+}
+
+.cmp-delta-flat,
+.cmp-delta-none {
+  color: var(--texto-suave);
+  font-weight: 600;
+}
+
+.cmp-previous {
+  grid-column: 1 / -1;
+  text-align: right;
+  font-size: 12.5px;
+  color: var(--texto-suave);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- Registro retroactivo: calendario del mes ---- */
+
+.cal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--gap-md);
+  flex-wrap: wrap;
+}
+
+.cal-title {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--gap-sm);
+  font-size: 17px;
+  font-weight: 700;
+}
+
+.cal-nav {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--gap-sm);
+}
+
+.cal-nav-btn {
+  min-height: 34px;
+  padding: 4px 9px;
+}
+
+.cal-month {
+  font-size: 14px;
+  font-weight: 700;
+  min-width: 9.5rem;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.cal-grid {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 6px;
+  border: 1px solid var(--borde);
+  border-radius: var(--radio);
+  background: var(--superficie-2);
+  padding: var(--gap-md);
+}
+
+.cal-weekday {
+  text-align: center;
+  font-size: 11.5px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--texto-suave);
+}
+
+.cal-cell {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  min-height: 46px;
+  padding: 4px 2px;
+  border: 1px solid var(--borde);
+  border-radius: var(--radio-sm);
+  background: var(--superficie);
+  color: var(--texto);
+  font-family: inherit;
+  font-size: 13.5px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  transition: transform var(--transicion), box-shadow var(--transicion),
+    border-color var(--transicion);
+}
+
+.cal-cell:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: var(--glow-acento);
+}
+
+.cal-cell:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.cal-cell-pad {
+  border-color: transparent;
+  background: none;
+  cursor: default;
+}
+
+.cal-cell-full {
+  background: var(--exito-tinta);
+  border-color: var(--exito);
+}
+
+.cal-cell-partial {
+  background: var(--advertencia-tinta);
+  border-color: var(--advertencia);
+}
+
+.cal-cell-empty {
+  background: var(--peligro-tinta);
+  border-color: var(--peligro);
+}
+
+.cal-cell-none {
+  color: var(--texto-suave);
+  font-weight: 600;
+}
+
+.cal-cell-today {
+  box-shadow: var(--glow-foco);
+}
+
+.cal-cell-selected {
+  border-color: var(--primario-claro);
+  box-shadow: var(--glow-foco);
+}
+
+.cal-day-shield {
+  color: var(--cal-shield);
+}
+
+.cal-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--gap-sm) var(--gap-md);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 12.5px;
+  color: var(--texto-suave);
+}
+
+.cal-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.cal-legend-swatch {
+  width: 12px;
+  height: 12px;
+  border-radius: 4px;
+  border: 1px solid var(--borde);
+  background: var(--superficie);
+}
+
+.cal-legend-full {
+  background: var(--exito-tinta);
+  border-color: var(--exito);
+}
+
+.cal-legend-partial {
+  background: var(--advertencia-tinta);
+  border-color: var(--advertencia);
+}
+
+.cal-legend-empty {
+  background: var(--peligro-tinta);
+  border-color: var(--peligro);
+}
+
+.cal-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-sm);
+  padding: var(--gap-lg);
+  border: 1px solid var(--borde);
+  border-radius: var(--radio);
+  background: var(--superficie);
+  box-shadow: var(--sombra-sm);
+}
+
+.cal-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--gap-md);
+  flex-wrap: wrap;
+}
+
+.cal-panel-title {
+  display: flex;
+  align-items: center;
+  gap: var(--gap-sm);
+  flex-wrap: wrap;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.cal-panel-title .pill {
+  font-size: 11.5px;
+}
+
+.cal-panel-empty {
+  font-size: 13.5px;
+  color: var(--texto-suave);
+}
+
+.cal-panel-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-sm);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.cal-panel-item {
+  display: flex;
+  align-items: center;
+  gap: var(--gap-sm);
+  flex-wrap: wrap;
+  padding: 8px 0;
+  border-top: 1px solid var(--borde-suave);
+}
+
+.cal-panel-item .checkbox-wrapper {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.cal-panel-duration {
+  font-size: 12.5px;
+  color: var(--texto-suave);
+  font-variant-numeric: tabular-nums;
+  flex: none;
+}
+
+.cal-panel-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--gap-sm);
+  padding-top: var(--gap-sm);
+  border-top: 1px solid var(--borde-suave);
+  font-size: 13.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- Recordatorio de backup ---- */
+
+.backup-banner {
+  max-width: var(--container-max);
+  margin: calc(var(--navbar-height) + 12px) auto 0;
+  padding: var(--gap-md) var(--gap-lg);
+  display: flex;
+  align-items: center;
+  gap: var(--gap-md);
+  flex-wrap: wrap;
+  background: var(--superficie-2);
+  border: 1px solid var(--borde);
+  border-left: 3px solid var(--primario-claro);
+  border-radius: var(--radio);
+  -webkit-backdrop-filter: blur(12px) saturate(140%);
+  backdrop-filter: blur(12px) saturate(140%);
+  box-shadow: var(--sombra-sm);
+}
+
+.backup-banner .icon {
+  color: var(--primario-claro);
+  flex: none;
+}
+
+.backup-banner-text {
+  flex: 1 1 220px;
+  min-width: 0;
+  font-size: 13.5px;
+  color: var(--texto-suave);
+}
+
+.backup-banner-text strong {
+  color: var(--texto);
+}
+
+.backup-banner-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--gap-sm);
+  flex-wrap: wrap;
+}
+
+/* Fila de Ajustes con etiqueta encima de los tabs (no cabe en una línea). */
+.settings-row-column {
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--gap-sm);
+}
+
+@media (max-width: 560px) {
+  .cal-cell {
+    min-height: 40px;
+    font-size: 12.5px;
+  }
+
+  .cal-month {
+    min-width: 0;
+  }
+
+  .cmp-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .cmp-values {
+    justify-self: start;
+  }
+
+  .cmp-previous {
+    text-align: left;
+  }
+
+  .backup-banner-actions {
+    margin-left: 0;
+    width: 100%;
+  }
 }

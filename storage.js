@@ -3,12 +3,21 @@
  * localStorage con claves mirutina.*, schemaVersion, export/import y
  * errores tipados. Sin DOM, sin cálculos de negocio.
  * Cubre persistencia, JSON corrupto, bloqueo de esquema, export/import,
- * escucha del evento storage entre pestañas y revert con aviso tipado.
+ * escudos de racha, modo foco, idioma y recordatorio de backup (claves
+ * aditivas, opcionales en backups antiguos), escucha del evento storage entre
+ * pestañas y revert con aviso tipado. Los mensajes visibles se traducen con
+ * MiRutina.i18n (se construyen al usarse, nunca al cargar el módulo).
  */
 (function () {
   "use strict";
 
   window.MiRutina = window.MiRutina || {};
+
+  const i18n = window.MiRutina.i18n;
+
+  function t(key, params) {
+    return i18n.t(key, params);
+  }
 
   const SCHEMA_VERSION = 1;
 
@@ -17,27 +26,46 @@
     routines: "mirutina.routines",
     completions: "mirutina.completions",
     goals: "mirutina.goals",
+    shields: "mirutina.shields",
+    focus: "mirutina.focus",
+    backupPrefs: "mirutina.backupPrefs",
+    lastExport: "mirutina.lastExport",
     theme: "mirutina.theme",
+    lang: "mirutina.lang",
     schemaVersion: "mirutina.schemaVersion",
   };
 
   const KEY_PREFIX = "mirutina.";
-  const COLLECTION_NAMES = ["routines", "completions", "goals"];
+  const COLLECTION_NAMES = ["routines", "completions", "goals", "shields"];
+  // Colecciones que pueden faltar en un backup antiguo: se completan con [].
+  const OPTIONAL_COLLECTIONS = ["shields"];
   const ALL_KEYS = [
     KEYS.routines,
     KEYS.completions,
     KEYS.goals,
+    KEYS.shields,
+    KEYS.focus,
+    KEYS.backupPrefs,
+    KEYS.lastExport,
     KEYS.theme,
+    KEYS.lang,
     KEYS.schemaVersion,
   ];
 
   const THEMES = ["dark", "light"];
   const DEFAULT_THEME = "dark";
+  // Idiomas soportados (idioma por defecto: español, sin autodetección).
+  const LANGS = ["es", "en"];
+  const DEFAULT_LANG = "es";
+  // Frecuencia del recordatorio de backup en días (0 = nunca).
+  const BACKUP_REMINDER_DAYS = [0, 7, 14, 30];
+  const DEFAULT_BACKUP_REMINDER_DAYS = 14;
 
   /**
    * Registro de migraciones: `{ deVersión: (colecciones) => colecciones }`.
-   * Vacío hoy (la distribución nace en v1); punto único de entrada de
-   * formatos nuevos.
+   * Vacío hoy (la distribución nace en v1). Las claves añadidas después
+   * (escudos, modo foco) son aditivas y opcionales: un backup antiguo sin
+   * ellas se importa con valores por defecto, así que no exigen nueva versión.
    */
   const MIGRATIONS = {};
 
@@ -50,13 +78,22 @@
     version: "version", // versión de esquema del backup no reconocida
   };
 
-  const LOCKED_MESSAGE =
-    "Estos datos fueron creados por una versión más nueva de la app. " +
-    "Exporta el JSON crudo o vacía los datos para continuar.";
-  const UNAVAILABLE_MESSAGE =
-    "No se pueden guardar datos en este navegador: localStorage no está disponible.";
-  const QUOTA_MESSAGE =
-    "No hay espacio para guardar en este navegador (cuota de almacenamiento excedida).";
+  /**
+   * Mensajes del bloqueo, de la falta de localStorage y de la cuota.
+   * Son funciones: el idioma puede cambiar en caliente, así que el texto se
+   * resuelve en cada uso y no al cargar el módulo.
+   */
+  function lockedMessage() {
+    return t("storage.locked");
+  }
+
+  function unavailableMessage() {
+    return t("storage.unavailable");
+  }
+
+  function quotaMessage() {
+    return t("storage.quota");
+  }
 
   // Estado interno derivado del último arranque/escritura.
   let locked = false;
@@ -90,9 +127,9 @@
         exception instanceof DOMException &&
         exception.code === 22);
     if (isQuota) {
-      return storageError(ERROR_CODES.quota, QUOTA_MESSAGE);
+      return storageError(ERROR_CODES.quota, quotaMessage());
     }
-    return storageError(ERROR_CODES.unavailable, UNAVAILABLE_MESSAGE);
+    return storageError(ERROR_CODES.unavailable, unavailableMessage());
   }
 
   // ---- Acceso crudo a localStorage -----------------------------------------
@@ -138,7 +175,7 @@
     try {
       return ok(JSON.parse(raw));
     } catch (e) {
-      return fail(ERROR_CODES.corrupted, "JSON corrupto en la clave; se trata la colección como vacía.");
+      return fail(ERROR_CODES.corrupted, t("storage.corruptedJson"));
     }
   }
 
@@ -146,7 +183,7 @@
     try {
       return ok(JSON.stringify(value));
     } catch (e) {
-      return fail(ERROR_CODES.invalid, "No se pudo serializar el dato a JSON.");
+      return fail(ERROR_CODES.invalid, t("storage.serializeFailed"));
     }
   }
 
@@ -164,13 +201,13 @@
   function loadCollection(name) {
     const key = collectionKey(name);
     if (key === null) {
-      return fail(ERROR_CODES.invalid, "Colección desconocida: " + name);
+      return fail(ERROR_CODES.invalid, t("storage.unknownCollection", { name: name }));
     }
     if (locked) {
-      return fail(ERROR_CODES.locked, LOCKED_MESSAGE);
+      return fail(ERROR_CODES.locked, lockedMessage());
     }
     if (!isAvailable()) {
-      return fail(ERROR_CODES.unavailable, UNAVAILABLE_MESSAGE);
+      return fail(ERROR_CODES.unavailable, unavailableMessage());
     }
     const raw = readRaw(key);
     if (raw === null) {
@@ -181,7 +218,7 @@
       return parsed;
     }
     if (!Array.isArray(parsed.value)) {
-      return fail(ERROR_CODES.corrupted, "La clave no contiene una lista; se trata la colección como vacía.");
+      return fail(ERROR_CODES.corrupted, t("storage.notAList"));
     }
     return parsed;
   }
@@ -190,16 +227,16 @@
   function saveCollection(name, items) {
     const key = collectionKey(name);
     if (key === null) {
-      return fail(ERROR_CODES.invalid, "Colección desconocida: " + name);
+      return fail(ERROR_CODES.invalid, t("storage.unknownCollection", { name: name }));
     }
     if (!Array.isArray(items)) {
-      return fail(ERROR_CODES.invalid, 'La colección "' + name + '" debe ser una lista.');
+      return fail(ERROR_CODES.invalid, t("storage.collectionNotList", { name: name }));
     }
     if (locked) {
-      return fail(ERROR_CODES.locked, LOCKED_MESSAGE);
+      return fail(ERROR_CODES.locked, lockedMessage());
     }
     if (!isAvailable()) {
-      return fail(ERROR_CODES.unavailable, UNAVAILABLE_MESSAGE);
+      return fail(ERROR_CODES.unavailable, unavailableMessage());
     }
     const serialized = stringifyValue(items);
     if (!serialized.ok) {
@@ -216,20 +253,20 @@
    */
   function withPersist(name, holder, mutate) {
     if (!isPlainObject(holder) || !Array.isArray(holder.value)) {
-      return fail(ERROR_CODES.invalid, "withPersist necesita un holder con la referencia viva { value: lista }.");
+      return fail(ERROR_CODES.invalid, t("storage.holderRequired"));
     }
     if (typeof mutate !== "function") {
-      return fail(ERROR_CODES.invalid, "withPersist necesita una función mutate(actual) => nueva.");
+      return fail(ERROR_CODES.invalid, t("storage.mutateRequired"));
     }
     if (locked) {
-      return fail(ERROR_CODES.locked, LOCKED_MESSAGE);
+      return fail(ERROR_CODES.locked, lockedMessage());
     }
     if (!isAvailable()) {
-      return fail(ERROR_CODES.unavailable, UNAVAILABLE_MESSAGE);
+      return fail(ERROR_CODES.unavailable, unavailableMessage());
     }
     const next = mutate(holder.value);
     if (!Array.isArray(next)) {
-      return fail(ERROR_CODES.invalid, "mutate debe devolver la nueva lista.");
+      return fail(ERROR_CODES.invalid, t("storage.mutateNotList"));
     }
     const saved = saveCollection(name, next);
     if (!saved.ok) {
@@ -249,16 +286,166 @@
 
   function saveTheme(theme) {
     if (THEMES.indexOf(theme) === -1) {
-      return fail(ERROR_CODES.invalid, 'El tema debe ser "dark" o "light".');
+      return fail(ERROR_CODES.invalid, t("storage.themeInvalid"));
     }
     if (locked) {
-      return fail(ERROR_CODES.locked, LOCKED_MESSAGE);
+      return fail(ERROR_CODES.locked, lockedMessage());
     }
     if (!isAvailable()) {
-      return fail(ERROR_CODES.unavailable, UNAVAILABLE_MESSAGE);
+      return fail(ERROR_CODES.unavailable, unavailableMessage());
     }
     // Sin JSON: el script inline del <head> compara el valor crudo.
     return writeRaw(KEYS.theme, theme);
+  }
+
+  // ---- Idioma --------------------------------------------------------------
+
+  /** Idioma validado (`es`/`en`); ausente o inválido → español por defecto. */
+  function loadLang() {
+    const raw = readRaw(KEYS.lang);
+    return LANGS.indexOf(raw) !== -1 ? raw : DEFAULT_LANG;
+  }
+
+  function saveLang(lang) {
+    if (LANGS.indexOf(lang) === -1) {
+      return fail(ERROR_CODES.invalid, t("storage.langInvalid"));
+    }
+    if (locked) {
+      return fail(ERROR_CODES.locked, lockedMessage());
+    }
+    if (!isAvailable()) {
+      return fail(ERROR_CODES.unavailable, unavailableMessage());
+    }
+    // Sin JSON: el script inline del <head> compara el valor crudo.
+    return writeRaw(KEYS.lang, lang);
+  }
+
+  // ---- Modo foco (selección del día) ---------------------------------
+
+  /** Forma esperada: `{ date: "YYYY-MM-DD", routineIds: string[] }`; otra cosa → null. */
+  function normalizeFocus(value) {
+    if (!isPlainObject(value)) {
+      return null;
+    }
+    if (typeof value.date !== "string" || !Array.isArray(value.routineIds)) {
+      return null;
+    }
+    const ids = value.routineIds.filter(function (id) {
+      return typeof id === "string";
+    });
+    return { date: value.date, routineIds: ids };
+  }
+
+  /** Foco guardado del dispositivo; ausente o ilegible → null (sin foco). */
+  function loadFocus() {
+    const raw = readRaw(KEYS.focus);
+    if (raw === null) {
+      return null;
+    }
+    const parsed = parseJson(raw);
+    return parsed.ok ? normalizeFocus(parsed.value) : null;
+  }
+
+  /** Guarda el foco del día (null lo borra); mismo contrato de error que las colecciones. */
+  function saveFocus(focus) {
+    if (locked) {
+      return fail(ERROR_CODES.locked, lockedMessage());
+    }
+    if (!isAvailable()) {
+      return fail(ERROR_CODES.unavailable, unavailableMessage());
+    }
+    if (focus === null) {
+      return removeRaw(KEYS.focus);
+    }
+    const normalized = normalizeFocus(focus);
+    if (normalized === null) {
+      return fail(ERROR_CODES.invalid, t("storage.focusInvalid"));
+    }
+    const serialized = stringifyValue(normalized);
+    if (!serialized.ok) {
+      return serialized;
+    }
+    return writeRaw(KEYS.focus, serialized.value);
+  }
+
+  // ---- Recordatorio de backup ----------------------------------------------
+
+  /** Preferencias normalizadas del recordatorio; inválidas → valores por defecto. */
+  function normalizeBackupPrefs(value) {
+    if (!isPlainObject(value)) {
+      return null;
+    }
+    const days = value.reminderDays;
+    return {
+      reminderDays:
+        BACKUP_REMINDER_DAYS.indexOf(days) !== -1 ? days : DEFAULT_BACKUP_REMINDER_DAYS,
+      dismissedAt: typeof value.dismissedAt === "string" ? value.dismissedAt : null,
+    };
+  }
+
+  /** Preferencias guardadas; ausentes o ilegibles → 14 días sin descarte. */
+  function loadBackupPrefs() {
+    const raw = readRaw(KEYS.backupPrefs);
+    if (raw === null) {
+      return { reminderDays: DEFAULT_BACKUP_REMINDER_DAYS, dismissedAt: null };
+    }
+    const parsed = parseJson(raw);
+    if (!parsed.ok) {
+      return { reminderDays: DEFAULT_BACKUP_REMINDER_DAYS, dismissedAt: null };
+    }
+    return (
+      normalizeBackupPrefs(parsed.value) || {
+        reminderDays: DEFAULT_BACKUP_REMINDER_DAYS,
+        dismissedAt: null,
+      }
+    );
+  }
+
+  /** Guarda las preferencias del recordatorio (mismo contrato de error que el resto). */
+  function saveBackupPrefs(prefs) {
+    if (locked) {
+      return fail(ERROR_CODES.locked, lockedMessage());
+    }
+    if (!isAvailable()) {
+      return fail(ERROR_CODES.unavailable, unavailableMessage());
+    }
+    const normalized = normalizeBackupPrefs(prefs);
+    if (normalized === null || BACKUP_REMINDER_DAYS.indexOf(prefs.reminderDays) === -1) {
+      return fail(
+        ERROR_CODES.invalid,
+        t("storage.reminderInvalid", { days: BACKUP_REMINDER_DAYS.join(", ") })
+      );
+    }
+    const serialized = stringifyValue(normalized);
+    if (!serialized.ok) {
+      return serialized;
+    }
+    const written = writeRaw(KEYS.backupPrefs, serialized.value);
+    return written.ok ? ok(normalized) : written;
+  }
+
+  /** Instante ISO del último backup exportado; ausente o inválido → null. */
+  function loadLastExport() {
+    const raw = readRaw(KEYS.lastExport);
+    if (raw === null || Number.isNaN(new Date(raw).getTime())) {
+      return null;
+    }
+    return raw;
+  }
+
+  /** Anota el instante ISO de un backup exportado (valor crudo, sin JSON). */
+  function saveLastExport(iso) {
+    if (locked) {
+      return fail(ERROR_CODES.locked, lockedMessage());
+    }
+    if (!isAvailable()) {
+      return fail(ERROR_CODES.unavailable, unavailableMessage());
+    }
+    if (typeof iso !== "string" || Number.isNaN(new Date(iso).getTime())) {
+      return fail(ERROR_CODES.invalid, t("storage.lastExportInvalid"));
+    }
+    const written = writeRaw(KEYS.lastExport, iso);
+    return written.ok ? ok(iso) : written;
   }
 
   // ---- schemaVersion, bloqueo y migración -------------------
@@ -312,7 +499,10 @@
       routines: [],
       completions: [],
       goals: [],
+      shields: [],
+      focus: null,
       theme: DEFAULT_THEME,
+      lang: DEFAULT_LANG,
       corrupted: [],
     };
   }
@@ -330,6 +520,8 @@
       }
     });
     state.theme = loadTheme();
+    state.lang = loadLang();
+    state.focus = loadFocus();
     return state;
   }
 
@@ -380,7 +572,10 @@
       routines: state.routines,
       completions: state.completions,
       goals: state.goals,
+      shields: state.shields,
+      focus: state.focus,
       theme: state.theme,
+      lang: state.lang,
       corrupted: corruptedCollections.slice(),
     };
   }
@@ -402,27 +597,34 @@
   }
 
   /**
-   * Backup JSON legible (capa): colecciones + tema + schemaVersion.
+   * Backup JSON legible (capa): colecciones + tema + idioma + schemaVersion.
    * Una colección corrupta viaja vacía (solo se exporta lo legible).
    * Con esquema bloqueado → exportRaw (salida del modo bloqueo).
    */
   function exportAll() {
     if (locked) {
-      return fail(ERROR_CODES.locked, "Con esquema bloqueado usa exportRaw (JSON crudo).");
+      return fail(ERROR_CODES.locked, t("storage.exportLocked"));
     }
     if (!isAvailable()) {
-      return fail(ERROR_CODES.unavailable, UNAVAILABLE_MESSAGE);
+      return fail(ERROR_CODES.unavailable, unavailableMessage());
     }
     const state = readCollectionsState();
+    const exportedAt = new Date().toISOString();
     return stringifyValue({
       app: "mirutina",
       kind: "backup",
       schemaVersion: SCHEMA_VERSION,
-      exportedAt: new Date().toISOString(),
+      exportedAt: exportedAt,
       theme: state.theme,
+      lang: state.lang,
+      // Referencia del recordatorio: el propio backup es "el último backup".
+      lastExport: exportedAt,
+      backupReminderDays: loadBackupPrefs().reminderDays,
       routines: state.routines,
       completions: state.completions,
       goals: state.goals,
+      shields: state.shields,
+      focus: state.focus,
     });
   }
 
@@ -432,7 +634,7 @@
    */
   function exportRaw() {
     if (!isAvailable()) {
-      return fail(ERROR_CODES.unavailable, UNAVAILABLE_MESSAGE);
+      return fail(ERROR_CODES.unavailable, unavailableMessage());
     }
     const keys = {};
     ALL_KEYS.forEach(function (key) {
@@ -449,55 +651,74 @@
   /** Valida el contenido de un fichero importado. */
   function parseBackup(text) {
     if (typeof text !== "string") {
-      return fail(ERROR_CODES.invalid, "Se esperaba el contenido JSON del fichero.");
+      return fail(ERROR_CODES.invalid, t("storage.expectedJson"));
     }
     const parsed = parseJson(text);
     if (!parsed.ok) {
-      return fail(ERROR_CODES.invalid, "El fichero no es JSON válido.");
+      return fail(ERROR_CODES.invalid, t("storage.notJson"));
     }
     return validateBackup(parsed.value);
   }
 
-  /** Estructura mínima de un backup: formato y versión de esquema reconocidos. */
+  /**
+   * Estructura mínima de un backup: formato y versión de esquema reconocidos.
+   * Las claves añadidas después del lanzamiento (escudos, modo foco, idioma,
+   * último backup y frecuencia del recordatorio) pueden faltar: un backup
+   * antiguo se completa con valores por defecto.
+   */
   function validateBackup(value) {
     if (!isPlainObject(value)) {
-      return fail(ERROR_CODES.invalid, "El fichero no tiene el formato de un backup de MiRutina.");
+      return fail(ERROR_CODES.invalid, t("storage.notBackup"));
     }
     if (value.app !== undefined && value.app !== "mirutina") {
-      return fail(ERROR_CODES.invalid, 'El fichero no parece un backup de MiRutina (app distinta de "mirutina").');
+      return fail(ERROR_CODES.invalid, t("storage.wrongApp"));
     }
     if (typeof value.schemaVersion !== "number" || !Number.isInteger(value.schemaVersion)) {
-      return fail(ERROR_CODES.invalid, "El backup no indica una versión de esquema válida.");
+      return fail(ERROR_CODES.invalid, t("storage.schemaMissing"));
     }
     if (value.schemaVersion !== SCHEMA_VERSION) {
       return fail(
         ERROR_CODES.version,
-        "Versión de esquema no reconocida en el backup: " + value.schemaVersion + "."
+        t("storage.schemaUnknown", { version: value.schemaVersion })
       );
     }
     for (let i = 0; i < COLLECTION_NAMES.length; i += 1) {
       const name = COLLECTION_NAMES[i];
       const list = value[name];
+      if (list === undefined && OPTIONAL_COLLECTIONS.indexOf(name) !== -1) {
+        continue; // backup antiguo: se importa vacía
+      }
       if (!Array.isArray(list)) {
-        return fail(ERROR_CODES.invalid, 'El backup no incluye la colección "' + name + '" como lista.');
+        return fail(ERROR_CODES.invalid, t("storage.collectionMissing", { name: name }));
       }
       for (let j = 0; j < list.length; j += 1) {
         if (!isPlainObject(list[j])) {
-          return fail(
-            ERROR_CODES.invalid,
-            'La colección "' + name + '" del backup contiene entradas que no son objetos.'
-          );
+          return fail(ERROR_CODES.invalid, t("storage.collectionEntries", { name: name }));
         }
       }
     }
     if (value.theme !== undefined && THEMES.indexOf(value.theme) === -1) {
-      return fail(ERROR_CODES.invalid, 'El tema del backup debe ser "dark" o "light".');
+      return fail(ERROR_CODES.invalid, t("storage.backupThemeInvalid"));
+    }
+    if (value.focus !== undefined && value.focus !== null && normalizeFocus(value.focus) === null) {
+      return fail(ERROR_CODES.invalid, t("storage.backupFocusInvalid"));
     }
     return ok({
       routines: value.routines,
       completions: value.completions,
       goals: value.goals,
+      shields: Array.isArray(value.shields) ? value.shields : [],
+      focus: normalizeFocus(value.focus),
       theme: value.theme !== undefined ? value.theme : DEFAULT_THEME,
+      // Ausente o inválido (backup antiguo) → español, el idioma por defecto.
+      lang: LANGS.indexOf(value.lang) !== -1 ? value.lang : DEFAULT_LANG,
+      // Ausente (backup antiguo) → se conserva la referencia local del export.
+      lastExport: typeof value.lastExport === "string" && !Number.isNaN(new Date(value.lastExport).getTime())
+        ? value.lastExport
+        : null,
+      backupReminderDays: BACKUP_REMINDER_DAYS.indexOf(value.backupReminderDays) !== -1
+        ? value.backupReminderDays
+        : DEFAULT_BACKUP_REMINDER_DAYS,
       schemaVersion: SCHEMA_VERSION,
     });
   }
@@ -521,10 +742,10 @@
    */
   function importAll(backup) {
     if (locked) {
-      return fail(ERROR_CODES.locked, LOCKED_MESSAGE);
+      return fail(ERROR_CODES.locked, lockedMessage());
     }
     if (!isAvailable()) {
-      return fail(ERROR_CODES.unavailable, UNAVAILABLE_MESSAGE);
+      return fail(ERROR_CODES.unavailable, unavailableMessage());
     }
     const validated = validateBackup(backup);
     if (!validated.ok) {
@@ -539,11 +760,24 @@
       [KEYS.routines, JSON.stringify(data.routines)],
       [KEYS.completions, JSON.stringify(data.completions)],
       [KEYS.goals, JSON.stringify(data.goals)],
+      [KEYS.shields, JSON.stringify(data.shields)],
+      // Foco ausente en el backup → se borra la clave (queda sin foco).
+      [KEYS.focus, data.focus === null ? null : JSON.stringify(data.focus)],
+      // El descarte local se limpia: con datos restaurados toca reevaluar.
+      [
+        KEYS.backupPrefs,
+        JSON.stringify({ reminderDays: data.backupReminderDays, dismissedAt: null }),
+      ],
       [KEYS.theme, data.theme],
+      [KEYS.lang, data.lang],
       [KEYS.schemaVersion, JSON.stringify(SCHEMA_VERSION)],
     ];
+    if (data.lastExport !== null) {
+      writes.push([KEYS.lastExport, data.lastExport]);
+    }
     for (let i = 0; i < writes.length; i += 1) {
-      const result = writeRaw(writes[i][0], writes[i][1]);
+      const result =
+        writes[i][1] === null ? removeRaw(writes[i][0]) : writeRaw(writes[i][0], writes[i][1]);
       if (!result.ok) {
         restoreRawValues(previous);
         return result;
@@ -560,7 +794,7 @@
    */
   function clearAll() {
     if (!isAvailable()) {
-      return fail(ERROR_CODES.unavailable, UNAVAILABLE_MESSAGE);
+      return fail(ERROR_CODES.unavailable, unavailableMessage());
     }
     const toRemove = [];
     for (let i = 0; i < window.localStorage.length; i += 1) {
@@ -616,6 +850,18 @@
     withPersist: withPersist,
     loadTheme: loadTheme,
     saveTheme: saveTheme,
+    LANGS: LANGS,
+    DEFAULT_LANG: DEFAULT_LANG,
+    loadLang: loadLang,
+    saveLang: saveLang,
+    loadFocus: loadFocus,
+    saveFocus: saveFocus,
+    loadBackupPrefs: loadBackupPrefs,
+    saveBackupPrefs: saveBackupPrefs,
+    loadLastExport: loadLastExport,
+    saveLastExport: saveLastExport,
+    BACKUP_REMINDER_DAYS: BACKUP_REMINDER_DAYS,
+    DEFAULT_BACKUP_REMINDER_DAYS: DEFAULT_BACKUP_REMINDER_DAYS,
     backupFileName: backupFileName,
     exportAll: exportAll,
     exportRaw: exportRaw,

@@ -1,30 +1,27 @@
 /**
  * MiRutina Vanilla — domain.js
  * Cálculos puros: fechas, duraciones, programación con límite de 24 h,
- * tiempos libres, cumplimiento, periodos, rachas, objetivos, estadísticas
- * y validaciones. Todas las reglas de negocio viven aquí, con "hoy"
- * siempre como parámetro. Sin DOM ni localStorage.
+ * tiempos libres, cumplimiento, periodos, rachas (con escudos), objetivos,
+ * tiempo invertido de por vida, modo foco, estadísticas y validaciones.
+ * Todas las reglas de negocio viven aquí, con "hoy" siempre como parámetro.
+ * Sin DOM ni localStorage. Los textos visibles se traducen con MiRutina.i18n.
  */
 (function () {
   "use strict";
 
   window.MiRutina = window.MiRutina || {};
 
+  const i18n = window.MiRutina.i18n;
+
+  function t(key, params) {
+    return i18n.t(key, params);
+  }
+
   // ---- Fechas como cadenas `YYYY-MM-DD`; los cálculos usan UTC para
   // no verse afectados por husos horarios ni por el cambio de hora.
   // "Hoy" siempre llega como parámetro: aquí no se lee el reloj del sistema.
 
   const WEEKDAYS = [1, 2, 3, 4, 5, 6, 7];
-
-  const WEEKDAY_LABELS = {
-    1: "lunes",
-    2: "martes",
-    3: "miércoles",
-    4: "jueves",
-    5: "viernes",
-    6: "sábado",
-    7: "domingo",
-  };
 
   // getUTCDay: 0 = domingo … 6 = sábado → 1 = lunes … 7 = domingo.
   const WEEKDAY_BY_JS_DAY = [7, 1, 2, 3, 4, 5, 6];
@@ -97,30 +94,28 @@
     return hours * 60 + minutes;
   }
 
-  /** Formatea minutos como `Xh Ym` (p. ej. `21h 30m`). */
+  /** Formatea minutos como `Xh Ym` (p. ej. `21h 30m`); igual en ambos idiomas. */
   function formatDuration(minutes) {
-    const hours = Math.floor(minutes / 60);
-    const rest = minutes % 60;
-    return `${hours}h ${rest}m`;
+    return i18n.duration(minutes);
   }
 
   /** Duración > 0 y ≤ 24 h; horas 0–24 y minutos 0–59 (24 h solo con 00 m). */
   function validateDuration(hours, minutes) {
     if (!Number.isInteger(hours) || !Number.isInteger(minutes)) {
-      return { ok: false, message: "La duración debe expresarse con enteros de horas y minutos." };
+      return { ok: false, message: t("rt.form.error.durationIntegers") };
     }
     if (minutes < 0 || minutes > 59) {
-      return { ok: false, message: "Los minutos deben estar entre 0 y 59; expresa el resto como horas." };
+      return { ok: false, message: t("rt.form.error.durationMinutes") };
     }
     if (hours < 0 || hours > 24) {
-      return { ok: false, message: "Las horas deben estar entre 0 y 24." };
+      return { ok: false, message: t("rt.form.error.durationHours") };
     }
     if (hours === 24 && minutes > 0) {
-      return { ok: false, message: "La duración máxima es 24h 00m." };
+      return { ok: false, message: t("rt.form.error.durationMax") };
     }
     const total = toMinutes(hours, minutes);
     if (total <= 0) {
-      return { ok: false, message: "La duración debe ser mayor que 0." };
+      return { ok: false, message: t("rt.form.error.durationZero") };
     }
     return { ok: true, value: total };
   }
@@ -214,13 +209,13 @@
   /** Al menos un día de la semana seleccionado, y todos los días válidos (1–7). */
   function validateWeekdays(weekdays) {
     if (!Array.isArray(weekdays) || weekdays.length === 0) {
-      return { ok: false, message: "Selecciona al menos un día de la semana." };
+      return { ok: false, message: t("rt.form.error.weekdays") };
     }
     const allValid = weekdays.every(
       (day) => Number.isInteger(day) && day >= 1 && day <= 7
     );
     if (!allValid) {
-      return { ok: false, message: "Hay un día de la semana no válido." };
+      return { ok: false, message: t("rt.form.error.weekdayInvalid") };
     }
     return { ok: true, value: weekdays };
   }
@@ -345,6 +340,218 @@
     return scheduled === 0 ? 0 : (completed / scheduled) * 100;
   }
 
+  // ---- Comparativas periodo vs. periodo.
+  // Se comparan periodos naturales equivalentes (semana con semana, mes con
+  // mes) recortados al mismo avance: un mes en curso se mide contra el mismo
+  // tramo del mes anterior ("día 18 con día 18"), no contra el mes entero.
+
+  /** Días naturales entre dos fechas (b − a). */
+  function daysBetween(a, b) {
+    return Math.round((parseDate(b).getTime() - parseDate(a).getTime()) / 86400000);
+  }
+
+  /** Semana natural anterior a la de `hoy` (lunes a domingo). */
+  function previousWeekRange(hoy) {
+    const current = weekRange(hoy);
+    return { start: addDays(current.start, -7), end: addDays(current.end, -7) };
+  }
+
+  /** Mes natural anterior al de `hoy` (años bisiestos incluidos). */
+  function previousMonthRange(hoy) {
+    const parsed = parseDate(hoy);
+    const year = parsed.getUTCFullYear();
+    const month = parsed.getUTCMonth();
+    const start = formatDateString(new Date(Date.UTC(year, month - 1, 1)));
+    const end = formatDateString(new Date(Date.UTC(year, month, 0)));
+    return { start, end };
+  }
+
+  /** Días transcurridos de un periodo hasta hoy, contando hoy (0 si no ha empezado). */
+  function elapsedDays(range, hoy) {
+    const end = compareDates(range.end, hoy) > 0 ? hoy : range.end;
+    if (compareDates(range.start, end) > 0) {
+      return 0;
+    }
+    return daysBetween(range.start, end) + 1;
+  }
+
+  /**
+   * Periodo anterior comparable: mismo avance que el actual sobre su periodo
+   * natural ("el día 18 del mes anterior"). `null` si el actual no ha empezado.
+   */
+  function comparableRange(current, previous, hoy) {
+    const elapsed = elapsedDays(current, hoy);
+    if (elapsed === 0) {
+      return null;
+    }
+    const end = addDays(previous.start, elapsed - 1);
+    return {
+      start: previous.start,
+      end: compareDates(end, previous.end) > 0 ? previous.end : end,
+    };
+  }
+
+  /**
+   * Métricas clave de un periodo: cumplimiento %, rutinas cumplidas,
+   * programadas, minutos cumplidos (día cumplido × duración) y días al
+   * 100 %. `hasData` distingue "sin programación" de "0 cumplidas".
+   */
+  function periodMetrics(entries, routines, range, hoy) {
+    const counts = periodCounts(entries, routines, range, hoy);
+    let minutes = 0;
+    let fullDays = 0;
+    forEachPeriodDay(range, hoy, (date) => {
+      const schedule = scheduleForDate(routines, date, hoy);
+      if (schedule.length === 0) {
+        return;
+      }
+      const dayEntries = entriesForDate(entries, date);
+      const marked = schedule.filter((routine) => isMarked(dayEntries, routine.id));
+      minutes += marked.reduce((total, routine) => total + routine.durationMinutes, 0);
+      if (marked.length === schedule.length) {
+        fullDays += 1;
+      }
+    });
+    return {
+      percent: counts.scheduled === 0 ? 0 : (counts.completed / counts.scheduled) * 100,
+      completedCount: counts.completed,
+      scheduledCount: counts.scheduled,
+      minutes,
+      fullDays,
+      hasData: counts.scheduled > 0,
+    };
+  }
+
+  /**
+   * Delta entre dos valores: absoluto siempre y relativo solo con base > 0
+   * (`null` evita ∞ cuando el periodo anterior no tiene nada con qué comparar).
+   */
+  function deltaOf(previousValue, currentValue) {
+    const absolute = currentValue - previousValue;
+    return {
+      absolute,
+      relative: previousValue > 0 ? (absolute / previousValue) * 100 : null,
+    };
+  }
+
+  /** Comparativa completa de dos periodos equivalentes (actual y anterior). */
+  function comparePeriods(entries, routines, currentRange, previousRange, hoy) {
+    const current = periodMetrics(entries, routines, currentRange, hoy);
+    const previous = periodMetrics(entries, routines, previousRange, hoy);
+    return {
+      current,
+      previous,
+      hasAnyData: current.hasData || previous.hasData,
+      hasPreviousData: previous.hasData,
+      deltas: {
+        percent: deltaOf(previous.percent, current.percent),
+        completedCount: deltaOf(previous.completedCount, current.completedCount),
+        minutes: deltaOf(previous.minutes, current.minutes),
+        fullDays: deltaOf(previous.fullDays, current.fullDays),
+      },
+    };
+  }
+
+  // ---- Rejilla de mes para el calendario retroactivo.
+
+  /** Mes desplazado ±n desde `anchor`, siempre con el día 1 (evita meses cortos). */
+  function addMonths(anchor, months) {
+    const parsed = parseDate(anchor);
+    return formatDateString(
+      new Date(Date.UTC(parsed.getUTCFullYear(), parsed.getUTCMonth() + months, 1))
+    );
+  }
+
+  /**
+   * Mes que contiene `anchor` como semanas de lunes a domingo; las celdas de
+   * relleno de fuera del mes van como `null`.
+   */
+  function monthGrid(anchor) {
+    const parsed = parseDate(anchor);
+    const year = parsed.getUTCFullYear();
+    const month = parsed.getUTCMonth();
+    const first = formatDateString(new Date(Date.UTC(year, month, 1)));
+    const last = formatDateString(new Date(Date.UTC(year, month + 1, 0)));
+    const totalDays = Number(last.slice(8, 10));
+    const cells = [];
+    for (let pad = 0; pad < weekdayOf(first) - 1; pad += 1) {
+      cells.push(null);
+    }
+    for (let day = 1; day <= totalDays; day += 1) {
+      cells.push(formatDateString(new Date(Date.UTC(year, month, day))));
+    }
+    while (cells.length % 7 !== 0) {
+      cells.push(null);
+    }
+    const weeks = [];
+    for (let index = 0; index < cells.length; index += 7) {
+      weeks.push(cells.slice(index, index + 7));
+    }
+    return weeks;
+  }
+
+  // ---- Escudo de racha: hasta 2 "días libres" por año natural.
+  // Un día con escudo sin cumplir es neutro: no suma ni rompe la racha.
+  // Un día cumplido suma siempre, lleve escudo o no: aplicar un escudo a un
+  // día ya cumplido nunca resta racha.
+
+  const MAX_SHIELDS_PER_YEAR = 2;
+
+  /** Año natural de una fecha `YYYY-MM-DD`. */
+  function yearOf(date) {
+    return Number(date.slice(0, 4));
+  }
+
+  /** ¿El día lleva escudo? */
+  function hasShield(shields, date) {
+    return shields.some((shield) => shield.date === date);
+  }
+
+  /** Escudos aplicados en un año natural. */
+  function shieldsForYear(shields, year) {
+    return shields.filter((shield) => yearOf(shield.date) === year);
+  }
+
+  /** Escudos que quedan por usar en un año natural. */
+  function shieldsRemaining(shields, year) {
+    return Math.max(0, MAX_SHIELDS_PER_YEAR - shieldsForYear(shields, year).length);
+  }
+
+  /** Aplicar escudo: solo al presente o pasado, sin duplicados y con cupo del año. */
+  function canAddShield(shields, date, hoy) {
+    if (isFuture(date, hoy)) {
+      return { ok: false, message: t("toast.shield.future") };
+    }
+    if (hasShield(shields, date)) {
+      return { ok: false, message: t("shield.exists") };
+    }
+    const year = yearOf(date);
+    if (shieldsRemaining(shields, year) === 0) {
+      return { ok: false, message: t("shield.noRoom", { year: year }) };
+    }
+    return { ok: true, value: date };
+  }
+
+  /** Nueva colección de escudos con el día añadido. */
+  function addShield(shields, date, hoy) {
+    const check = canAddShield(shields, date, hoy);
+    if (!check.ok) {
+      return check;
+    }
+    return { ok: true, value: shields.concat([{ date }]) };
+  }
+
+  /** Nueva colección de escudos sin el día indicado. */
+  function removeShield(shields, date) {
+    if (!hasShield(shields, date)) {
+      return { ok: false, message: t("shield.missing") };
+    }
+    return {
+      ok: true,
+      value: shields.filter((shield) => shield.date !== date),
+    };
+  }
+
   // ---- Rachas: general 🔥 y por rutina. "Hoy" es
   // mutable: suma si está al 100 % en el momento de calcular; si no, la racha
   // queda en ese momento en 0.
@@ -358,12 +565,14 @@
    * - Hoy incompleto deja la racha en 0 (crece o rompe durante el día).
    * - Sin rutinas creadas → 0.
    * - No se mira antes de la creación de la primera rutina: entonces la racha
-   * era 0 (no existía ninguna rutina creada).
+   *   era 0 (no existía ninguna rutina creada).
+   * - Un día incompleto con escudo es neutro: ni suma ni rompe.
    */
-  function generalStreak(entries, routines, hoy) {
+  function generalStreak(entries, routines, hoy, shields) {
     if (routines.length === 0) {
       return 0;
     }
+    const shieldList = shields || [];
     const oldestCreation = earliestCreationDate(routines) ?? hoy;
     let streak = 0;
     let date = hoy;
@@ -372,10 +581,12 @@
       const dayEntries = entriesForDate(entries, date);
       // `every` sobre programación vacía = día cumplido.
       const fulfilled = schedule.every((routine) => isMarked(dayEntries, routine.id));
-      if (!fulfilled) {
+      if (!fulfilled && !hasShield(shieldList, date)) {
         break;
       }
-      streak += 1;
+      if (fulfilled) {
+        streak += 1;
+      }
       date = addDays(date, -1);
     }
     return streak;
@@ -385,18 +596,21 @@
    * Racha de una rutina: días consecutivos en los que tocaba
    * y fue cumplida. Los días en los que no toca se saltan sin romper; hoy sin
    * marcar (habiendo tocado) deja la racha en 0. Siendo inactiva, solo
-   * cuenta en fechas pasadas y en hoy no.
+   * cuenta en fechas pasadas y en hoy no. Un día con escudo sin marcar es
+   * neutro: ni suma ni rompe.
    */
-  function routineStreak(entries, routine, hoy) {
+  function routineStreak(entries, routine, hoy, shields) {
+    const shieldList = shields || [];
     const oldestCreation = creationDate(routine) ?? hoy;
     let streak = 0;
     let date = hoy;
     while (compareDates(date, oldestCreation) >= 0) {
       if (isDue(routine, date, hoy)) {
-        if (!isMarked(entriesForDate(entries, date), routine.id)) {
+        if (isMarked(entriesForDate(entries, date), routine.id)) {
+          streak += 1;
+        } else if (!hasShield(shieldList, date)) {
           break;
         }
-        streak += 1;
       }
       date = addDays(date, -1);
     }
@@ -407,9 +621,9 @@
    * rachas por rutina más largas (hasta 4), de mayor a menor; los
    * empates se resuelven por nombre alfabético.
    */
-  function topStreaks(entries, routines, hoy) {
+  function topStreaks(entries, routines, hoy, shields) {
     return routines
-      .map((routine) => ({ routine, streak: routineStreak(entries, routine, hoy) }))
+      .map((routine) => ({ routine, streak: routineStreak(entries, routine, hoy, shields) }))
       .sort(
         (a, b) =>
           b.streak - a.streak || a.routine.name.localeCompare(b.routine.name, "es")
@@ -438,6 +652,45 @@
   function creationDate(routine) {
     const parsed = new Date(routine.createdAt);
     return Number.isNaN(parsed.getTime()) ? null : toDateString(parsed);
+  }
+
+  // ---- Tiempo invertido de por vida: días cumplidos × duración de la rutina.
+  // No hay tracking real: los minutos salen del historial de marcas.
+
+  /** Minutos acumulados de una rutina a lo largo de todo el historial. */
+  function routineLifetimeMinutes(entries, routine) {
+    const completedDays = entries.filter(
+      (entry) => entry.routineId === routine.id && entry.completed
+    ).length;
+    return completedDays * routine.durationMinutes;
+  }
+
+  /** Minutos acumulados de todas las rutinas juntas (total histórico). */
+  function totalLifetimeMinutes(entries, routines) {
+    return routines.reduce(
+      (total, routine) => total + routineLifetimeMinutes(entries, routine),
+      0
+    );
+  }
+
+  /** Duración legible larga por idioma: "42 h 30 min" (es) / "42h 30m" (en). */
+  function formatLifetimeDuration(minutes) {
+    return i18n.lifetimeDuration(minutes);
+  }
+
+  // ---- Modo foco: hasta 3 prioridades por día, guardadas por fecha.
+  // El foco vive fuera del historial: cambiar de día lo devuelve al estado normal.
+
+  const MAX_FOCUS_PRIORITIES = 3;
+
+  /** ¿El modo foco está activo para esa fecha? */
+  function focusOn(focus, date) {
+    return !!focus && focus.date === date;
+  }
+
+  /** Ids priorizados de esa fecha (vacío si el foco es de otro día o no existe). */
+  function focusIds(focus, date) {
+    return focusOn(focus, date) ? focus.routineIds : [];
   }
 
   // ---- Progreso de objetivos
@@ -577,10 +830,10 @@
   /** Meta entera > 0 y progreso inicial entero ≥ 0 (se permite meta < progreso). */
   function validateGoal(input) {
     if (!Number.isInteger(input.target) || input.target <= 0) {
-      return { ok: false, message: "La meta debe ser un número entero mayor que 0." };
+      return { ok: false, message: t("goals.form.error.target") };
     }
     if (!Number.isInteger(input.progress) || input.progress < 0) {
-      return { ok: false, message: "El progreso inicial debe ser un número entero mayor o igual a 0." };
+      return { ok: false, message: t("goals.form.error.progress") };
     }
     return { ok: true, value: input };
   }
@@ -588,7 +841,7 @@
   /** Campo de valor libre con signo del ajuste manual (entero distinto de 0). */
   function validateManualDelta(delta) {
     if (!Number.isInteger(delta) || delta === 0) {
-      return { ok: false, message: "Introduce un número entero distinto de cero." };
+      return { ok: false, message: t("goals.form.error.manualDelta") };
     }
     return { ok: true, value: delta };
   }
@@ -599,10 +852,10 @@
    */
   function validateCustomRange(inicio, fin, hoy) {
     if (compareDates(inicio, fin) > 0) {
-      return { ok: false, message: "La fecha de inicio debe ser anterior o igual a la de fin." };
+      return { ok: false, message: t("stats.custom.errorOrder") };
     }
     if (compareDates(fin, hoy) > 0) {
-      return { ok: false, message: "La fecha de fin no puede ser posterior a hoy." };
+      return { ok: false, message: t("stats.custom.errorFuture") };
     }
     return { ok: true, value: { start: inicio, end: fin } };
   }
@@ -610,7 +863,7 @@
   /** Nombre de rutina obligatorio. */
   function validateRoutineName(name) {
     if (typeof name !== "string" || name.trim() === "") {
-      return { ok: false, message: "El nombre es obligatorio." };
+      return { ok: false, message: t("rt.form.error.name") };
     }
     return { ok: true, value: name };
   }
@@ -618,7 +871,7 @@
   /** Título de objetivo obligatorio. */
   function validateGoalTitle(title) {
     if (typeof title !== "string" || title.trim() === "") {
-      return { ok: false, message: "El título es obligatorio." };
+      return { ok: false, message: t("goals.form.error.title") };
     }
     return { ok: true, value: title };
   }
@@ -626,7 +879,7 @@
   /** Color en formato `#RRGGBB` (selector + entrada manual). */
   function validateHexColor(color) {
     if (typeof color !== "string" || !/^#[0-9a-fA-F]{6}$/.test(color)) {
-      return { ok: false, message: "Color inválido: usa el formato #RRGGBB." };
+      return { ok: false, message: t("goals.form.error.colorInvalid") };
     }
     return { ok: true, value: color };
   }
@@ -634,7 +887,6 @@
   window.MiRutina.domain = {
     // date
     WEEKDAYS,
-    WEEKDAY_LABELS,
     toDateString,
     parseDate,
     formatDateString,
@@ -665,11 +917,41 @@
     weekRange,
     monthRange,
     partialPeriodPercent,
+    daysBetween,
+    previousWeekRange,
+    previousMonthRange,
+    elapsedDays,
+    comparableRange,
+    // comparativas
+    periodMetrics,
+    deltaOf,
+    comparePeriods,
+    // calendario
+    addMonths,
+    monthGrid,
+    // shields
+    MAX_SHIELDS_PER_YEAR,
+    yearOf,
+    hasShield,
+    shieldsForYear,
+    shieldsRemaining,
+    canAddShield,
+    addShield,
+    removeShield,
+    // lifetime
+    routineLifetimeMinutes,
+    totalLifetimeMinutes,
+    formatLifetimeDuration,
+    // focus
+    MAX_FOCUS_PRIORITIES,
+    focusOn,
+    focusIds,
     // streaks
     TOP_STREAKS,
     generalStreak,
     routineStreak,
     topStreaks,
+    earliestCreationDate,
     // goals
     MAX_ACTIVE_GOALS,
     applyRoutineToggle,

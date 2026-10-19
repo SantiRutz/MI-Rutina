@@ -2,6 +2,7 @@
  * MiRutina Vanilla — charts.js
  * Gráficos SVG a medida (barras, dona, línea) con geometría en funciones
  * puras y role="img" + aria-label. Sin librerías.
+ * Etiquetas, tooltips, leyendas y fechas se traducen con MiRutina.i18n.
  */
 "use strict";
 
@@ -9,11 +10,13 @@ window.MiRutina = window.MiRutina || {};
 
 (function (MiRutina) {
   var ui = MiRutina.ui;
+  var i18n = MiRutina.i18n;
   var el = ui.el;
   var svgEl = ui.svgEl;
 
-  // Iniciales de los días en orden 1 = lunes … 7 = domingo (etiquetas de UI).
-  var WEEKDAY_INITIALS = ["L", "M", "X", "J", "V", "S", "D"];
+  function t(key, params) {
+    return i18n.t(key, params);
+  }
 
   var SEMAPHORE_VAR = {
     green: "var(--color-success)",
@@ -95,10 +98,11 @@ window.MiRutina = window.MiRutina || {};
   // Utilidades compartidas
   // ------------------------------------------------------------------
 
+  /** Inicial del día por idioma: "L"/"X" (es), "M"/"W" (en). */
   function weekdayInitial(date) {
     var domain = MiRutina.domain;
     if (!domain || typeof domain.weekdayOf !== "function") return "";
-    return WEEKDAY_INITIALS[domain.weekdayOf(date) - 1] || "";
+    return i18n.weekdayInitial(domain.weekdayOf(date));
   }
 
   function semaphoreVar(percent) {
@@ -149,7 +153,7 @@ window.MiRutina = window.MiRutina || {};
         el("li", { class: "bar-row" }, [
           el("span", { class: "bar-label", title: item.label, text: item.label }),
           el("span", { class: "bar-track" }, [svg]),
-          el("span", { class: "bar-percent", text: percent + "%" }),
+          el("span", { class: "bar-percent", text: i18n.percent(percent) }),
         ])
       );
     });
@@ -162,15 +166,17 @@ window.MiRutina = window.MiRutina || {};
   }
 
   function describeBars(items) {
-    if (items.length === 0) return "Cumplimiento por rutina: sin datos.";
-    return (
-      "Cumplimiento por rutina: " +
-      items
+    if (items.length === 0) return t("chart.bars.aria", { items: t("chart.days.none") });
+    return t("chart.bars.aria", {
+      items: items
         .map(function (item) {
-          return item.label + " " + Math.round(item.percent) + " por ciento";
+          return t("chart.bars.item", {
+            label: item.label,
+            percent: Math.round(item.percent),
+          });
         })
-        .join("; ")
-    );
+        .join("; "),
+    });
   }
 
   // ------------------------------------------------------------------
@@ -188,7 +194,7 @@ window.MiRutina = window.MiRutina || {};
     var chart = el("div", {
       class: "chart chart-mini",
       role: "img",
-      "aria-label": describeDays(days, "Cumplimiento de los últimos 7 días"),
+      "aria-label": describeDays(days, "chart.mini.aria"),
     });
 
     days.forEach(function (day) {
@@ -199,7 +205,7 @@ window.MiRutina = window.MiRutina || {};
 
       chart.appendChild(
         el("div", { class: "mini-column" }, [
-          el("span", { class: "mini-value", text: percent + "%" }),
+          el("span", { class: "mini-value", text: i18n.percent(percent) }),
           el("div", { class: "mini-track" }, [
             svgEl(
               "svg",
@@ -258,14 +264,11 @@ window.MiRutina = window.MiRutina || {};
         class: "donut-svg",
         viewBox: "0 0 " + DONUT_VIEWBOX + " " + DONUT_VIEWBOX,
         role: "img",
-        "aria-label":
-          "Registros cumplidos: " +
-          completed +
-          " de " +
-          total +
-          "; no cumplidos: " +
-          pending +
-          ".",
+        "aria-label": t("chart.donut.aria", {
+          completed: completed,
+          total: total,
+          pending: pending,
+        }),
       },
       [
         svgEl("circle", {
@@ -290,20 +293,23 @@ window.MiRutina = window.MiRutina || {};
       el("div", { class: "donut" }, [
         svg,
         el("div", { class: "donut-center" }, [
-          el("span", { class: "donut-value", text: Math.round(fraction * 100) + "%" }),
-          el("span", { class: "donut-caption", text: "cumplidos" }),
+          el("span", {
+            class: "donut-value",
+            text: i18n.percent(fraction * 100),
+          }),
+          el("span", { class: "donut-caption", text: t("chart.donut.caption") }),
         ]),
       ]),
       el("ul", { class: "donut-legend" }, [
         el("li", { class: "legend-item" }, [
           el("span", { class: "legend-dot legend-dot-completed", "aria-hidden": "true" }),
-          "Cumplidos ",
-          el("strong", { text: String(completed) }),
+          t("chart.donut.completed") + " ",
+          el("strong", { text: i18n.number(completed) }),
         ]),
         el("li", { class: "legend-item" }, [
           el("span", { class: "legend-dot legend-dot-pending", "aria-hidden": "true" }),
-          "No cumplidos ",
-          el("strong", { text: String(pending) }),
+          t("chart.donut.pending") + " ",
+          el("strong", { text: i18n.number(pending) }),
         ]),
       ]),
     ]);
@@ -390,21 +396,17 @@ window.MiRutina = window.MiRutina || {};
       {
         class: "line-plot",
         role: "img",
-        "aria-label": describeDays(days, "Porcentaje diario de los últimos 7 días"),
+        "aria-label": describeDays(days, "chart.line.aria"),
       },
       [svg]
     );
     points.forEach(function (point, index) {
       var day = days[index];
-      var tipText =
-        weekdayInitial(day.date) +
-        " " +
-        day.date.slice(8, 10) +
-        "/" +
-        day.date.slice(5, 7) +
-        " · " +
-        Math.round(day.percent) +
-        " %";
+      var tipText = t("chart.line.tooltip", {
+        day: weekdayInitial(day.date),
+        date: i18n.dayShort(day.date),
+        percent: i18n.number(Math.round(day.percent)),
+      });
       var pointWrap = el(
         "button",
         {
@@ -448,14 +450,18 @@ window.MiRutina = window.MiRutina || {};
     });
   }
 
-  function describeDays(days, prefix) {
-    if (!days || days.length === 0) return prefix + ": sin datos.";
+  function describeDays(days, prefixKey) {
+    var prefix = t(prefixKey);
+    if (!days || days.length === 0) return t("chart.days.empty", { prefix: prefix });
     return (
       prefix +
       ": " +
       days
         .map(function (day) {
-          return day.date + ", " + Math.round(day.percent) + " por ciento";
+          return t("chart.days.item", {
+            date: i18n.numericDate(day.date),
+            percent: Math.round(day.percent),
+          });
         })
         .join("; ")
     );

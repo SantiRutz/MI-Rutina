@@ -7,6 +7,15 @@ window.MiRutina = window.MiRutina || {};
   var storage = MiRutina.storage;
   var ui = MiRutina.ui;
   var charts = MiRutina.charts;
+  var i18n = MiRutina.i18n;
+
+  function t(key, params) {
+    return i18n.t(key, params);
+  }
+
+  function plural(key, count, params) {
+    return i18n.plural(key, count, params);
+  }
 
   //Estado en memoria único
   function emptyState() {
@@ -16,7 +25,10 @@ window.MiRutina = window.MiRutina || {};
       routines: [],
       entries: [],
       goals: [],
+      shields: [],
+      focus: null,
       theme: "dark",
+      lang: storage.DEFAULT_LANG,
       corrupted: [],
     };
   }
@@ -33,32 +45,32 @@ window.MiRutina = window.MiRutina || {};
   var SCREENS = {
     "#/": {
       sectionId: "screen-inicio",
-      title: "Inicio",
+      titleKey: "screen.inicio",
       render: renderDashboard,
     },
     "#/registro": {
       sectionId: "screen-registro",
-      title: "Registro",
+      titleKey: "screen.registro",
       render: renderRegistro,
     },
     "#/rutinas": {
       sectionId: "screen-rutinas",
-      title: "Rutinas",
+      titleKey: "screen.rutinas",
       render: renderRutinas,
     },
     "#/historial": {
       sectionId: "screen-historial",
-      title: "Historial",
+      titleKey: "screen.historial",
       render: renderHistorial,
     },
     "#/estadisticas": {
       sectionId: "screen-estadisticas",
-      title: "Estadísticas",
+      titleKey: "screen.estadisticas",
       render: renderEstadisticas,
     },
     "#/objetivos": {
       sectionId: "screen-objetivos",
-      title: "Objetivos",
+      titleKey: "screen.objetivos",
       render: renderObjetivos,
     },
   };
@@ -74,21 +86,14 @@ window.MiRutina = window.MiRutina || {};
 
   function greeting() {
     var hour = new Date().getHours();
-    if (hour < 6) return "Buenas noches";
-    if (hour < 12) return "Buenos días";
-    if (hour < 20) return "Buenas tardes";
-    return "Buenas noches";
+    if (hour < 6) return t("dash.greeting.night");
+    if (hour < 12) return t("dash.greeting.morning");
+    if (hour < 20) return t("dash.greeting.afternoon");
+    return t("dash.greeting.night");
   }
 
   function formatLongDate(dateString) {
-    var parts = dateString.split("-").map(Number);
-    var parsed = new Date(parts[0], parts[1] - 1, parts[2]);
-    return parsed.toLocaleDateString("es-ES", {
-      weekday: "long",
-      day: "numeric",
-      month: "long",
-      year: "numeric",
-    });
+    return i18n.longDate(dateString);
   }
 
   var idSeq = 0;
@@ -125,16 +130,22 @@ window.MiRutina = window.MiRutina || {};
       // la nombra "entries".
       entries: loaded.completions,
       goals: loaded.goals,
+      shields: loaded.shields || [],
+      focus: loaded.focus || null,
       theme: loaded.theme,
+      lang: loaded.lang || storage.DEFAULT_LANG,
       corrupted: loaded.corrupted || [],
     };
+    reloadBackupState();
     return state;
   }
 
   //Aviso de una escritura fallida.
   function notifyWriteError(result) {
     ui.toast({
-      message: "No se pudo guardar: " + (result.error ? result.error.message : "error desconocido"),
+      message: t("error.saveFailed", {
+        message: result.error ? result.error.message : t("common.unknownError"),
+      }),
       variant: "error",
     });
   }
@@ -147,10 +158,7 @@ window.MiRutina = window.MiRutina || {};
     }
     state.corrupted.forEach(function (name) {
       ui.toast({
-        message:
-          'La colección "' +
-          name +
-          '" contiene datos dañados (JSON corrupto); se inicia vacía. Las demás colecciones no se tocan.',
+        message: t("error.corruptedCollection", { name: name }),
         variant: "error",
       });
     });
@@ -168,13 +176,13 @@ window.MiRutina = window.MiRutina || {};
       [
         ui.icon("alert", { size: 20 }),
         ui.el("p", { class: "storage-banner-text" }, [
-          ui.el("strong", { text: "No se pueden guardar datos en este navegador. " }),
-          "localStorage no está disponible: los cambios se revertirán al instante y la app queda en modo solo lectura.",
+          ui.el("strong", { text: t("banner.storage.title") }),
+          t("banner.storage.text"),
         ]),
         ui.el("button", {
           type: "button",
           class: "btn btn-secondary btn-sm storage-banner-close",
-          text: "Entendido",
+          text: t("banner.storage.ok"),
           onclick: function () {
             banner.remove();
           },
@@ -182,6 +190,135 @@ window.MiRutina = window.MiRutina || {};
       ]
     );
     slot.appendChild(banner);
+  }
+
+  /** Repinta el banner de storage con el idioma en curso (si está visible). */
+  function refreshStorageBanner() {
+    var existing = document.getElementById("storage-banner");
+    if (!existing) return;
+    existing.remove();
+    renderStorageBanner();
+  }
+
+  // ---- Recordatorio de backup: aviso discreto cuando pasa demasiado tiempo
+  // desde el último export (frecuencia configurable; 0 = nunca).
+
+  /** Preferencias + referencia del último backup; se recarga con el estado. */
+  var backupState = {
+    reminderDays: storage.DEFAULT_BACKUP_REMINDER_DAYS,
+    dismissedAt: null,
+    lastExport: null,
+  };
+
+  function reloadBackupState() {
+    var prefs = storage.loadBackupPrefs();
+    backupState = {
+      reminderDays: prefs.reminderDays,
+      dismissedAt: prefs.dismissedAt,
+      lastExport: storage.loadLastExport(),
+    };
+  }
+
+  /** Fecha (local) de una marca ISO; `null` si no es un instante válido. */
+  function isoToDate(iso) {
+    if (typeof iso !== "string") return null;
+    var parsed = new Date(iso);
+    return isNaN(parsed.getTime()) ? null : domain.toDateString(parsed);
+  }
+
+  /**
+   * Referencia del recordatorio: el último backup exportado o, sin él, el
+   * descarte más reciente; sin ninguno, la fecha de la rutina más antigua
+   * (los datos llevan ahí desde entonces).
+   */
+  function backupReferenceDate() {
+    var reference = null;
+    [backupState.lastExport, backupState.dismissedAt].forEach(function (iso) {
+      var date = isoToDate(iso);
+      if (date !== null && (reference === null || domain.compareDates(date, reference) > 0)) {
+        reference = date;
+      }
+    });
+    return reference === null ? domain.earliestCreationDate(state.routines) : reference;
+  }
+
+  /**
+   * Días desde la última referencia si toca recordar el backup; `null` si no
+   * toca (frecuencia "nunca", sin datos que respaldar o dentro del periodo).
+   */
+  function backupReminderAge() {
+    if (state.status !== "ok" || backupState.reminderDays === 0 || state.routines.length === 0) {
+      return null;
+    }
+    var reference = backupReferenceDate();
+    if (reference === null) {
+      return null;
+    }
+    var days = domain.daysBetween(reference, today());
+    return days >= backupState.reminderDays ? days : null;
+  }
+
+  /**
+   * Retira el aviso si ya no toca y lo pinta si toca (una sola instancia).
+   * `repaint` rehace el aviso visible (cambio de idioma).
+   */
+  function syncBackupBanner(repaint) {
+    var slot = document.getElementById("backup-banner-slot");
+    if (!slot) return;
+    var existing = document.getElementById("backup-banner");
+    var days = backupReminderAge();
+    if (days === null) {
+      if (existing) existing.remove();
+      return;
+    }
+    if (existing) {
+      if (!repaint) return;
+      existing.remove();
+    }
+    slot.appendChild(backupBannerNode(days));
+  }
+
+  /** Aviso de intensidad baja (el de storage bloqueado manda): texto + 2 acciones. */
+  function backupBannerNode(days) {
+    return ui.el("div", { id: "backup-banner", class: "backup-banner", role: "status" }, [
+      ui.icon("save", { size: 18 }),
+      ui.el("p", { class: "backup-banner-text" }, [
+        ui.el("strong", { text: plural("backup.banner.strong", days, { count: days }) }),
+        t("backup.banner.text"),
+      ]),
+      ui.el("div", { class: "backup-banner-actions" }, [
+        ui.el("button", {
+          type: "button",
+          class: "btn btn-secondary btn-sm",
+          text: t("backup.banner.export"),
+          onclick: function () {
+            exportData(false);
+            syncBackupBanner();
+          },
+        }),
+        ui.el("button", {
+          type: "button",
+          class: "btn btn-ghost btn-sm",
+          text: t("backup.banner.later"),
+          "aria-label": t("backup.banner.later.aria"),
+          onclick: dismissBackupReminder,
+        }),
+      ]),
+    ]);
+  }
+
+  /** Descartar pospone el aviso un periodo completo desde ahora. */
+  function dismissBackupReminder() {
+    var saved = storage.saveBackupPrefs({
+      reminderDays: backupState.reminderDays,
+      dismissedAt: new Date().toISOString(),
+    });
+    if (!saved.ok) {
+      notifyWriteError(saved);
+      return;
+    }
+    backupState.dismissedAt = saved.value.dismissedAt;
+    syncBackupBanner();
   }
 
   //Tema 
@@ -213,13 +350,74 @@ window.MiRutina = window.MiRutina || {};
   function updateThemeButton() {
     if (!themeButton) return;
     var isLight = state.theme === "light";
+    var label = t(isLight ? "nav.theme.toDark" : "nav.theme.toLight");
     ui.clear(themeButton);
     themeButton.appendChild(ui.icon(isLight ? "sun" : "moon", { size: 18 }));
-    themeButton.setAttribute(
-      "aria-label",
-      isLight ? "Cambiar al tema oscuro" : "Cambiar al tema claro"
-    );
-    themeButton.title = isLight ? "Cambiar al tema oscuro" : "Cambiar al tema claro";
+    themeButton.setAttribute("aria-label", label);
+    themeButton.title = label;
+  }
+
+  //Selector de idioma: un único botón que ofrece el idioma destino (ES↔EN).
+
+  var languageButton = null;
+  var languageLabel = null;
+
+  function bindLanguageSwitcher() {
+    languageButton = document.getElementById("lang-switch");
+    languageLabel = document.getElementById("lang-label");
+    if (!languageButton) return;
+    languageButton.addEventListener("click", function () {
+      changeLanguage(state.lang === "es" ? "en" : "es");
+    });
+    updateLanguageSwitcher();
+  }
+
+  /** Etiqueta con el idioma destino y la acción traducida en aria-label/title. */
+  function updateLanguageSwitcher() {
+    if (!languageButton) return;
+    var target = state.lang === "es" ? "en" : "es";
+    var action = t(target === "en" ? "nav.language.toEn" : "nav.language.toEs");
+    if (languageLabel) languageLabel.textContent = target.toUpperCase();
+    languageButton.setAttribute("aria-label", action);
+    languageButton.title = action;
+  }
+
+  /** Pie de página con el año en curso y el idioma activo. */
+  function renderFooter() {
+    var note = document.getElementById("footer-note");
+    if (note) note.textContent = t("footer.note", { year: new Date().getFullYear() });
+  }
+
+  /**
+   * Refresca todo lo que no depende del render de pantalla: `<html lang>`,
+   * navbar estática, pie y banner de storage. No repinta la pantalla.
+   */
+  function syncLanguageUi() {
+    i18n.setLocale(state.lang);
+    i18n.applyStaticDom(document);
+    updateThemeButton();
+    updateLanguageSwitcher();
+    renderFooter();
+    refreshStorageBanner();
+  }
+
+  /**
+   * Cambio de idioma al instante: persiste, re-renderiza la pantalla actual y
+   * repinta los avisos. Si la escritura falla, se queda el idioma anterior.
+   * @param {string} lang
+   */
+  function changeLanguage(lang) {
+    if (!i18n.isLocale(lang) || lang === state.lang) return;
+    var saved = storage.saveLang(lang);
+    if (!saved.ok) {
+      notifyWriteError(saved);
+      return;
+    }
+    state.lang = lang;
+    syncLanguageUi();
+    rerender();
+    syncBackupBanner(true);
+    ui.toast({ message: t("nav.language.changed"), variant: "info" });
   }
 
   //Router por hash 
@@ -266,7 +464,7 @@ window.MiRutina = window.MiRutina || {};
     ui.clear(container);
 
     ui.setActiveRoute(route);
-    document.title = screen.title + " — MiRutina";
+    document.title = t("app.documentTitle", { title: t(screen.titleKey) });
     renderedOn = today();
 
     screen.render(container);
@@ -294,6 +492,7 @@ window.MiRutina = window.MiRutina || {};
   function checkMidnight() {
     if (renderedOn !== null && renderedOn !== today()) {
       rerender();
+      syncBackupBanner();
       return true;
     }
     return false;
@@ -318,6 +517,8 @@ window.MiRutina = window.MiRutina || {};
     formRefs = null;
     removingId = null;
     historyAnchor = null;
+    calendarMonth = null;
+    calendarDate = null;
     statsPeriod = "week";
     statsCustomRange = null;
     statsCustomDraft = null;
@@ -333,14 +534,16 @@ window.MiRutina = window.MiRutina || {};
 
   function onVisibleOrFocus() {
     checkMidnight();
+    syncBackupBanner();
   }
 
   //Refresco de cortesía entre pestañas: solo claves `mirutina.
   function onStorageChange() {
     reloadState();
     applyTheme(state.theme);
-    updateThemeButton();
+    syncLanguageUi();
     rerender();
+    syncBackupBanner(true);
   }
 
   //Modo bloqueo
@@ -363,20 +566,18 @@ window.MiRutina = window.MiRutina || {};
     var lock = ui.el("section", {
       id: "screen-lock",
       class: "screen",
-      "aria-label": "Datos incompatibles",
+      "aria-label": t("screen.locked"),
     });
     lock.appendChild(
       ui.emptyState({
         icon: "🔒",
-        title: "Datos creados por una versión más nueva de la app",
-        description:
-          "Estos datos fueron creados por una versión más nueva de MiRutina y no se leerán ni se modificarán. " +
-          "Puedes exportar el JSON crudo o vaciar los datos desde Ajustes para continuar.",
+        title: t("lock.empty.title"),
+        description: t("lock.empty.description"),
       })
     );
     main.appendChild(lock);
 
-    document.title = "Datos incompatibles — MiRutina";
+    document.title = t("app.documentTitle", { title: t("screen.locked") });
     renderedOn = today();
   }
 
@@ -398,11 +599,11 @@ window.MiRutina = window.MiRutina || {};
       return item.id === routineId;
     });
     if (!routine) {
-      ui.toast({ message: "La rutina ya no existe.", variant: "error" });
+      ui.toast({ message: t("toast.routineMissing"), variant: "error" });
       return { ok: false };
     }
     if (domain.isFuture(date, today())) {
-      ui.toast({ message: "No se pueden registrar fechas futuras.", variant: "error" });
+      ui.toast({ message: t("toast.future"), variant: "error" });
       return { ok: false };
     }
 
@@ -437,8 +638,8 @@ window.MiRutina = window.MiRutina || {};
     rerender();
     ui.toast({
       message: marked
-        ? "«" + routine.name + "» desmarcada."
-        : "«" + routine.name + "» marcada como cumplida.",
+        ? t("toast.routineUnmarked", { name: routine.name })
+        : t("toast.routineMarked", { name: routine.name }),
       variant: "success",
     });
     return { ok: true };
@@ -471,30 +672,34 @@ window.MiRutina = window.MiRutina || {};
   }
 
   /**
-   * Marca/desmarca todas las rutinas programadas de una fecha:
+   * Marca/desmarca todas las rutinas programadas de una fecha (o solo las
+   * de `routineIds`, p. ej. las prioridades del modo foco):
    * objetivos ±1 una sola vez por objetivo
    * vinculado (mismo criterio) y persistencia con el mismo patrón `toggleRoutine`.
    * @param {string} date Fecha `YYYY-MM-DD` (≤ hoy).
    * @param {boolean} marked true para marcar, false para desmarcar.
+   * @param {Array<string>} [routineIds] Subconjunto a afectar; sin él, toda la programación.
    * @returns {{ok:boolean, error?:Error}} resultado para la UI.
    */
-  function setAll(date, marked) {
+  function setAll(date, marked, routineIds) {
     checkMidnight();
     if (domain.isFuture(date, today())) {
-      ui.toast({ message: "No se pueden registrar fechas futuras.", variant: "error" });
+      ui.toast({ message: t("toast.future"), variant: "error" });
       return { ok: false };
     }
     var dayEntries = domain.entriesForDate(state.entries, date);
-    var targets = domain
-      .scheduleForDate(state.routines, date, today())
-      .filter(function (routine) {
-        return domain.isMarked(dayEntries, routine.id) !== marked;
+    var pool = domain.scheduleForDate(state.routines, date, today());
+    if (routineIds) {
+      pool = pool.filter(function (routine) {
+        return routineIds.indexOf(routine.id) !== -1;
       });
+    }
+    var targets = pool.filter(function (routine) {
+      return domain.isMarked(dayEntries, routine.id) !== marked;
+    });
     if (targets.length === 0) {
       ui.toast({
-        message: marked
-          ? "No queda ninguna rutina pendiente de marcar."
-          : "No hay rutinas marcadas en este día.",
+        message: marked ? t("toast.setAll.noneToMark") : t("toast.setAll.noneMarked"),
         variant: "info",
       });
       return { ok: true };
@@ -533,10 +738,10 @@ window.MiRutina = window.MiRutina || {};
       return committed;
     }
     rerender();
-    //Concordancia de número: "1 rutina marcada." / "2 rutinas marcadas.".
-    var suffix = targets.length === 1 ? "" : "s";
     ui.toast({
-      message: targets.length + " rutina" + suffix + " " + (marked ? "marcada" : "desmarcada") + suffix + ".",
+      message: plural(marked ? "toast.setAll.marked" : "toast.setAll.unmarked", targets.length, {
+        count: targets.length,
+      }),
       variant: "success",
     });
     return { ok: true };
@@ -556,19 +761,19 @@ window.MiRutina = window.MiRutina || {};
    */
   function saveNote(routineId, date, note) {
     if (domain.isFuture(date, today())) {
-      return { ok: false, message: "No se pueden registrar fechas futuras." };
+      return { ok: false, message: t("toast.future") };
     }
     if (note.length > NOTE_MAX_LENGTH) {
       return {
         ok: false,
-        message: "La nota no puede superar los " + NOTE_MAX_LENGTH + " caracteres.",
+        message: t("note.limit", { max: NOTE_MAX_LENGTH }),
       };
     }
     var entry = state.entries.find(function (item) {
       return item.routineId === routineId && item.date === date;
     });
     if (!entry) {
-      return { ok: false, message: "Marca la rutina para poder añadirle una nota." };
+      return { ok: false, message: t("note.needMark") };
     }
     var nextEntry = {
       routineId: entry.routineId,
@@ -585,12 +790,12 @@ window.MiRutina = window.MiRutina || {};
       notifyWriteError(saved);
       return {
         ok: false,
-        message: "No se pudo guardar la nota: " + saved.error.message,
+        message: t("note.saveFailed", { message: saved.error.message }),
         error: saved.error,
       };
     }
     state.entries = nextEntries;
-    return { ok: true, message: "Nota guardada." };
+    return { ok: true, message: t("note.saved") };
   }
 
   //Navbar: tema y Ajustes
@@ -676,7 +881,10 @@ window.MiRutina = window.MiRutina || {};
   }
 
   function renderDashHeader() {
-    var streak = domain.generalStreak(state.entries, state.routines, today());
+    var hoy = today();
+    var streak = domain.generalStreak(state.entries, state.routines, hoy, state.shields);
+    var shieldYear = domain.yearOf(hoy);
+    var shieldsLeft = domain.shieldsRemaining(state.shields, shieldYear);
     return revealWrap(
       ui.el("header", { class: "dash-header" }, [
         ui.el("div", {}, [
@@ -688,9 +896,32 @@ window.MiRutina = window.MiRutina || {};
               "span",
               {
                 class: "pill pill-streak",
-                "aria-label": "Racha general: " + streak + " días",
+                "aria-label": plural("dash.streak.aria", streak, { count: streak }),
               },
-              [ui.icon("flame", { size: 13 }), streak + " " + (streak === 1 ? "día" : "días") + " de racha"]
+              [
+                ui.icon("flame", { size: 13 }),
+                plural("dash.streak.pill", streak, { count: streak }),
+              ]
+            ),
+            // escudos disponibles: días libres que no rompen la racha.
+            ui.el(
+              "span",
+              {
+                class: "pill pill-shield",
+                title: t("dash.shield.title"),
+                "aria-label": t("dash.shield.aria", {
+                  year: shieldYear,
+                  left: shieldsLeft,
+                  max: domain.MAX_SHIELDS_PER_YEAR,
+                }),
+              },
+              [
+                ui.icon("shield", { size: 13 }),
+                t("dash.shield.pill", {
+                  left: shieldsLeft,
+                  max: domain.MAX_SHIELDS_PER_YEAR,
+                }),
+              ]
             ),
           ]),
         ]),
@@ -704,7 +935,7 @@ window.MiRutina = window.MiRutina || {};
               window.location.hash = "#/registro";
             },
           },
-          [ui.icon("check-circle", { size: 18 }), "Registrar hoy"]
+          [ui.icon("check-circle", { size: 18 }), t("dash.registerToday")]
         ),
       ]),
       0
@@ -739,29 +970,32 @@ window.MiRutina = window.MiRutina || {};
       todayPercent < 40 ? "danger" : todayPercent >= 70 ? "success" : null;
 
     return revealWrap(
-      ui.el("section", { class: "dash-cards", "aria-label": "Resumen" }, [
+      ui.el("section", { class: "dash-cards", "aria-label": t("dash.cards.aria") }, [
         summaryCard(
-          "Hoy",
-          Math.round(todayPercent) + "%",
-          todayCompletion.completedCount + "/" + todayCompletion.scheduledCount + " rutinas",
+          t("dash.card.today"),
+          i18n.percent(Math.round(todayPercent)),
+          plural("dash.routinesCount", todayCompletion.scheduledCount, {
+            done: todayCompletion.completedCount,
+            total: todayCompletion.scheduledCount,
+          }),
           todayTone
         ),
         summaryCard(
-          "Esta semana",
-          Math.round(weekPercent) + "%",
+          t("dash.card.week"),
+          i18n.percent(Math.round(weekPercent)),
           weekCounts.completed + "/" + weekCounts.scheduled,
           "accent"
         ),
         summaryCard(
-          "Este mes",
-          Math.round(monthPercent) + "%",
+          t("dash.card.month"),
+          i18n.percent(Math.round(monthPercent)),
           monthCounts.completed + "/" + monthCounts.scheduled,
           "success"
         ),
         summaryCard(
-          "Minutos hoy",
+          t("dash.card.minutes"),
           String(todayCompletion.completedMinutes),
-          "de " + todayCompletion.scheduledMinutes + " min"
+          t("dash.minutesHint", { minutes: todayCompletion.scheduledMinutes })
         ),
       ]),
       60
@@ -775,8 +1009,8 @@ window.MiRutina = window.MiRutina || {};
 
     if (schedule.length === 0) {
       body = emptyAlert(
-        "No hay rutinas programadas para hoy.",
-        "Creá la primera rutina",
+        t("dash.today.empty"),
+        t("dash.today.emptyAction"),
         function () {
           window.location.hash = "#/rutinas";
         }
@@ -794,11 +1028,11 @@ window.MiRutina = window.MiRutina || {};
     var card = ui.el("div", { class: "card" }, [
       ui.el("div", { class: "card-head" }, [
         ui.icon("check-circle", { size: 20, className: "card-icon" }),
-        ui.el("h2", { id: "today-title", class: "card-title", text: "Rutinas de hoy" }),
+        ui.el("h2", { id: "today-title", class: "card-title", text: t("dash.today.title") }),
         ui.el("a", {
           class: "btn btn-secondary btn-sm card-action",
           href: "#/registro",
-          text: "Ir a registrar",
+          text: t("dash.today.goLog"),
         }),
       ]),
       body,
@@ -825,7 +1059,7 @@ window.MiRutina = window.MiRutina || {};
         id: "check-" + routine.id,
         checked: marked,
         checkedColor: "var(--color-success)",
-        ariaLabel: (marked ? "Desmarcar " : "Marcar ") + routine.name,
+        ariaLabel: t(marked ? "check.unmark" : "check.mark", { name: routine.name }),
         onChange: function () {
           toggleRoutine(routine.id);
         },
@@ -861,13 +1095,13 @@ window.MiRutina = window.MiRutina || {};
     var card = ui.el("div", { class: "card" }, [
       ui.el("div", { class: "card-head" }, [
         ui.icon("chart", { size: 20, className: "card-icon" }),
-        ui.el("h2", { id: "week-title", class: "card-title", text: "Últimos 7 días" }),
+        ui.el("h2", { id: "week-title", class: "card-title", text: t("dash.week.title") }),
       ]),
       ui.el("div", { class: "card-body" }, [
         charts.miniBarChart(domain.last7DaysPercents(state.entries, state.routines, today())),
         ui.el("p", {
           class: "dash-legend",
-          text: "Verde ≥ 70 % · Amarillo 40–69 % · Rojo < 40 %",
+          text: t("dash.week.legend"),
         }),
       ]),
     ]);
@@ -882,11 +1116,11 @@ window.MiRutina = window.MiRutina || {};
     if (state.routines.length === 0) {
       body = ui.el("p", {
         class: "dash-muted",
-        text: "Aún no hay rutinas con racha que mostrar.",
+        text: t("dash.streaks.empty"),
       });
     } else {
       var list = ui.el("ul", { class: "streak-list" });
-      var top = domain.topStreaks(state.entries, state.routines, today());
+      var top = domain.topStreaks(state.entries, state.routines, today(), state.shields);
       top.forEach(function (item) {
         list.appendChild(
           ui.el("li", { class: "streak-item" }, [
@@ -908,13 +1142,13 @@ window.MiRutina = window.MiRutina || {};
           ? list
           : ui.el("p", {
               class: "dash-muted",
-              text: "Aún no hay rutinas con racha que mostrar.",
+              text: t("dash.streaks.empty"),
             });
     }
     var card = ui.el("div", { class: "card" }, [
       ui.el("div", { class: "card-head" }, [
         ui.icon("flame", { size: 20, className: "card-icon" }),
-        ui.el("h2", { id: "streaks-title", class: "card-title", text: "Rachas top" }),
+        ui.el("h2", { id: "streaks-title", class: "card-title", text: t("dash.streaks.title") }),
       ]),
       body,
     ]);
@@ -929,7 +1163,7 @@ window.MiRutina = window.MiRutina || {};
     var body;
     if (active.length === 0) {
       // estado vacío con enlace de acción "Creá el primero".
-      body = emptyAlert("No hay objetivos todavía.", "Creá el primero", function () {
+      body = emptyAlert(t("dash.goals.empty"), t("dash.goals.emptyAction"), function () {
         if (currentRoute() === "#/objetivos") {
           openCreateGoalForm();
         } else {
@@ -958,12 +1192,16 @@ window.MiRutina = window.MiRutina || {};
             ]),
             ui.progressBar({
               value: domain.saturatedBarPercent(goal),
-              label: "Progreso de " + goal.title,
+              label: t("dash.goals.progressAria", { title: goal.title }),
               color: goal.color,
             }),
             ui.el("p", {
               class: "goal-numbers",
-              text: goal.progress + " / " + goal.target + " · % real " + percent + "%",
+              text: t("dash.goals.numbers", {
+                progress: goal.progress,
+                target: goal.target,
+                percent: percent,
+              }),
             }),
           ])
         );
@@ -973,7 +1211,7 @@ window.MiRutina = window.MiRutina || {};
     var card = ui.el("div", { class: "card" }, [
       ui.el("div", { class: "card-head" }, [
         ui.icon("target", { size: 20, className: "card-icon" }),
-        ui.el("h2", { id: "goals-title", class: "card-title", text: "Objetivos activos" }),
+        ui.el("h2", { id: "goals-title", class: "card-title", text: t("dash.goals.title") }),
       ]),
       body,
     ]);
@@ -985,17 +1223,17 @@ window.MiRutina = window.MiRutina || {};
 
   function renderQuickAccess() {
     var links = [
-      { href: "#/rutinas", label: "Rutinas", icon: "list" },
-      { href: "#/historial", label: "Historial", icon: "calendar" },
-      { href: "#/estadisticas", label: "Estadísticas", icon: "chart" },
-      { href: "#/objetivos", label: "Objetivos", icon: "trophy" },
+      { href: "#/rutinas", key: "nav.routines", icon: "list" },
+      { href: "#/historial", key: "nav.history", icon: "calendar" },
+      { href: "#/estadisticas", key: "nav.stats", icon: "chart" },
+      { href: "#/objetivos", key: "nav.goals", icon: "trophy" },
     ];
-    var nav = ui.el("nav", { class: "quick-grid", "aria-label": "Accesos rápidos" });
+    var nav = ui.el("nav", { class: "quick-grid", "aria-label": t("dash.quick.aria") });
     links.forEach(function (link) {
       nav.appendChild(
         ui.el("a", { class: "quick-link", href: link.href }, [
           ui.el("span", { class: "quick-icon" }, [ui.icon(link.icon, { size: 20 })]),
-          ui.el("span", { class: "quick-label", text: link.label }),
+          ui.el("span", { class: "quick-label", text: t(link.key) }),
         ])
       );
     });
@@ -1011,9 +1249,16 @@ window.MiRutina = window.MiRutina || {};
   //`setAll` y se refleja aquí en cada re-render.
 
   var GOAL_VIEW_TABS = [
-    { id: "list", label: "Listado" },
-    { id: "manual", label: "Ajuste manual" },
+    { id: "list", key: "goals.tab.list" },
+    { id: "manual", key: "goals.tab.manual" },
   ];
+
+  /** Traduce las etiquetas de una lista de pestañas (id + clave i18n). */
+  function tabItems(items) {
+    return items.map(function (item) {
+      return { id: item.id, label: t(item.key) };
+    });
+  }
   /** Botones rápidos: positivos y sus equivalentes negativos. */
   var GOAL_QUICK_DELTAS = [1, 5, 10, 25, 50, -1, -5, -10, -25, -50];
   var DEFAULT_GOAL_COLOR = "#6366f1";
@@ -1096,7 +1341,7 @@ window.MiRutina = window.MiRutina || {};
         ui.el("div", { class: "goals-head-row" }, [
           ui.el("h1", { class: "goals-title" }, [
             ui.icon("trophy", { size: 28 }),
-            "Objetivos",
+            t("goals.title"),
           ]),
           goalsView === "list" && goalEditing === null
             ? ui.el(
@@ -1106,14 +1351,14 @@ window.MiRutina = window.MiRutina || {};
                   class: "btn btn-primary",
                   onclick: openCreateGoalForm,
                 },
-                [ui.icon("plus", { size: 18 }), "Nuevo objetivo"]
+                [ui.icon("plus", { size: 18 }), t("goals.new")]
               )
             : null,
         ]),
         ui.tabs({
-          items: GOAL_VIEW_TABS,
+          items: tabItems(GOAL_VIEW_TABS),
           value: goalsView,
-          ariaLabel: "Vista de objetivos",
+          ariaLabel: t("goals.tabs.aria"),
           onChange: function (id) {
             checkMidnight();
             goalsView = id;
@@ -1137,7 +1382,7 @@ window.MiRutina = window.MiRutina || {};
       panel.appendChild(
         revealWrap(
           ui.el("section", {
-            "aria-label": goalEditing.mode === "create" ? "Crear objetivo" : "Editar objetivo",
+            "aria-label": t(goalEditing.mode === "create" ? "goals.aria.create" : "goals.aria.edit"),
           }, [ui.el("div", { class: "card card-body" }, [buildGoalForm()])]),
           0
         )
@@ -1151,17 +1396,17 @@ window.MiRutina = window.MiRutina || {};
   /** Filtro como pills segmentadas ("Todos" + cada año). */
   function renderGoalsFilter() {
     var year = selectedGoalYear();
-    var items = [{ id: "all", label: "Todos" }].concat(
+    var items = [{ id: "all", label: t("goals.filter.all") }].concat(
       goalYears().map(function (optionYear) {
         return { id: String(optionYear), label: String(optionYear) };
       })
     );
     return revealWrap(
-      ui.el("section", { class: "goals-section", "aria-label": "Filtro por año" }, [
+      ui.el("section", { class: "goals-section", "aria-label": t("goals.filter.aria") }, [
         ui.tabs({
           items: items,
           value: year === null ? "all" : String(year),
-          ariaLabel: "Filtro de objetivos por año",
+          ariaLabel: t("goals.filter.groupAria"),
           onChange: function (id) {
             checkMidnight();
             goalsYear = id === "all" ? null : Number(id);
@@ -1179,11 +1424,11 @@ window.MiRutina = window.MiRutina || {};
     var body;
     if (state.goals.length === 0) {
       // aviso con enlace de acción "Creá el primero".
-      body = emptyAlert("No hay objetivos todavía.", "Creá el primero", openCreateGoalForm);
+      body = emptyAlert(t("dash.goals.empty"), t("dash.goals.emptyAction"), openCreateGoalForm);
     } else if (visible.length === 0) {
       body = emptyAlert(
-        "No hay objetivos en " + year + ".",
-        "Creá el primero",
+        t("goals.empty.year", { year: year }),
+        t("dash.goals.emptyAction"),
         openCreateGoalForm
       );
     } else {
@@ -1194,7 +1439,7 @@ window.MiRutina = window.MiRutina || {};
       body = list;
     }
     return revealWrap(
-      ui.el("section", { class: "goals-section", "aria-label": "Listado de objetivos" }, [body]),
+      ui.el("section", { class: "goals-section", "aria-label": t("goals.list.aria") }, [body]),
       120
     );
   }
@@ -1217,7 +1462,7 @@ window.MiRutina = window.MiRutina || {};
           ui.el("span", { class: "goals-card-year", text: String(goal.year) }),
           ui.el("span", {
             class: "goals-card-percent",
-            text: percent + "%",
+            text: i18n.percent(percent),
           }),
         ]),
         goal.description
@@ -1225,17 +1470,20 @@ window.MiRutina = window.MiRutina || {};
           : null,
         ui.progressBar({
           value: domain.saturatedBarPercent(goal),
-          label: "Progreso de " + goal.title,
+          label: t("dash.goals.progressAria", { title: goal.title }),
           color: goal.color,
         }),
         ui.el("div", { class: "goal-stats" }, [
-          goalStat("Progreso", String(goal.progress)),
-          goalStat("Meta", String(goal.target)),
-          goalStat("% real", percent + "%"),
+          goalStat(t("goals.stat.progress"), String(goal.progress)),
+          goalStat(t("goals.stat.target"), String(goal.target)),
+          goalStat(t("goals.stat.percent"), i18n.percent(percent)),
         ]),
         ui.el("p", {
           class: "goals-card-links",
-          text: linkedNames === "" ? "Sin rutinas vinculadas" : "Vinculadas: " + linkedNames,
+          text:
+            linkedNames === ""
+              ? t("goals.links.none")
+              : t("goals.links.some", { names: linkedNames }),
         }),
         ui.el("div", { class: "goals-card-actions" }, [
           ui.el(
@@ -1247,7 +1495,7 @@ window.MiRutina = window.MiRutina || {};
                 openEditGoalForm(goal);
               },
             },
-            [ui.icon("edit", { size: 15 }), "Editar"]
+            [ui.icon("edit", { size: 15 }), t("common.edit")]
           ),
           ui.el(
             "button",
@@ -1258,7 +1506,7 @@ window.MiRutina = window.MiRutina || {};
                 focusGoalAdjust(goal.id);
               },
             },
-            [ui.icon("target", { size: 15 }), "Ajustar"]
+            [ui.icon("target", { size: 15 }), t("goals.action.adjust")]
           ),
           ui.el(
             "button",
@@ -1269,7 +1517,7 @@ window.MiRutina = window.MiRutina || {};
                 askDeleteGoal(goal);
               },
             },
-            [ui.icon("trash", { size: 15 }), "Eliminar"]
+            [ui.icon("trash", { size: 15 }), t("common.delete")]
           ),
         ]),
       ]
@@ -1334,12 +1582,12 @@ window.MiRutina = window.MiRutina || {};
     if (state.goals.length === 0) {
       body = ui.emptyState({
         icon: "🎯",
-        title: "Aún no hay objetivos",
-        description: "Crea un objetivo para poder ajustar su progreso a mano.",
+        title: t("goals.manual.empty.title"),
+        description: t("goals.manual.empty.description"),
         actions: ui.el("button", {
           type: "button",
           class: "btn btn-primary",
-          text: "Crear objetivo",
+          text: t("goals.manual.create"),
           onclick: function () {
             goalsView = "list";
             openCreateGoalForm();
@@ -1360,7 +1608,7 @@ window.MiRutina = window.MiRutina || {};
     }
     panel.appendChild(
       revealWrap(
-        ui.el("section", { "aria-label": "Ajuste manual del progreso" }, [body]),
+        ui.el("section", { "aria-label": t("goals.manual.aria") }, [body]),
         0
       )
     );
@@ -1371,7 +1619,7 @@ window.MiRutina = window.MiRutina || {};
     var buttons = ui.el("div", {
       class: "goals-manual-buttons",
       role: "group",
-      "aria-label": "Ajustes rápidos para " + goal.title,
+      "aria-label": t("goals.manual.quickAria", { title: goal.title }),
     });
     GOAL_QUICK_DELTAS.forEach(function (delta) {
       buttons.appendChild(
@@ -1380,7 +1628,10 @@ window.MiRutina = window.MiRutina || {};
           class: "btn btn-secondary btn-sm",
           "data-goal-id": goal.id,
           "data-adjust": String(delta),
-          "aria-label": (delta > 0 ? "Sumar " : "Restar ") + Math.abs(delta) + " en " + goal.title,
+          "aria-label": t(delta > 0 ? "goals.manual.add" : "goals.manual.subtract", {
+            delta: Math.abs(delta),
+            title: goal.title,
+          }),
           text: delta > 0 ? "+" + delta : "−" + Math.abs(delta),
           onclick: function () {
             applyGoalAdjust(goal.id, delta);
@@ -1416,12 +1667,12 @@ window.MiRutina = window.MiRutina || {};
       [
         ui.el("div", { class: "goals-free-row" }, [
           ui.field({
-            label: "Valor libre con signo",
+            label: t("goals.manual.freeLabel"),
             control: freeInput,
             error: manualErrors[goal.id] || null,
-            hint: "Entero con signo, p. ej. −3 o 12 (suelo 0, sin tope).",
+            hint: t("goals.manual.freeHint"),
           }),
-          ui.el("button", { type: "submit", class: "btn btn-primary", text: "Aplicar" }),
+          ui.el("button", { type: "submit", class: "btn btn-primary", text: t("common.apply") }),
         ]),
       ]
     );
@@ -1436,13 +1687,11 @@ window.MiRutina = window.MiRutina || {};
         ui.el("span", { class: "goals-manual-title", text: goal.title }),
         ui.el("span", {
           class: "goals-manual-numbers",
-          text:
-            goal.progress +
-            " / " +
-            goal.target +
-            " · " +
-            Math.round(domain.goalPercent(goal)) +
-            "%",
+          text: t("goals.manual.numbers", {
+            progress: goal.progress,
+            target: goal.target,
+            percent: Math.round(domain.goalPercent(goal)),
+          }),
         }),
       ]),
       buttons,
@@ -1538,7 +1787,7 @@ window.MiRutina = window.MiRutina || {};
       type: "text",
       class: "rf-input",
       value: s.title,
-      placeholder: "Ej: Correr 500 km este año",
+      placeholder: t("goals.form.placeholderTitle"),
     });
     var descriptionInput = ui.el("input", {
       id: "goal-description",
@@ -1546,7 +1795,7 @@ window.MiRutina = window.MiRutina || {};
       type: "text",
       class: "rf-input",
       value: s.description,
-      placeholder: "Detalles, motivación, etc.",
+      placeholder: t("goals.form.placeholderDescription"),
     });
     var yearInput = ui.el("input", {
       id: "goal-year",
@@ -1556,7 +1805,7 @@ window.MiRutina = window.MiRutina || {};
       inputmode: "numeric",
       class: "rf-input",
       value: s.year,
-      "aria-label": "Año",
+      "aria-label": t("goals.form.label.year"),
     });
     var targetInput = ui.el("input", {
       id: "goal-target",
@@ -1567,7 +1816,7 @@ window.MiRutina = window.MiRutina || {};
       inputmode: "numeric",
       class: "rf-input",
       value: s.target,
-      "aria-label": "Meta",
+      "aria-label": t("goals.form.label.target"),
     });
     var progressInput = ui.el("input", {
       id: "goal-progress",
@@ -1578,14 +1827,14 @@ window.MiRutina = window.MiRutina || {};
       inputmode: "numeric",
       class: "rf-input",
       value: s.progress,
-      "aria-label": "Progreso inicial",
+      "aria-label": t("goals.form.label.progress"),
     });
     var colorSwatch = ui.el("input", {
       type: "color",
       class: "color-swatch",
       value: HEX_COLOR_PATTERN.test(s.color) ? s.color.toLowerCase() : DEFAULT_GOAL_COLOR,
-      "aria-label": "Selector de color",
-      title: "Selector de color",
+      "aria-label": t("goals.form.ariaColor"),
+      title: t("goals.form.ariaColor"),
     });
     var colorText = ui.el("input", {
       id: "goal-color",
@@ -1639,51 +1888,61 @@ window.MiRutina = window.MiRutina || {};
       },
       [
         ui.el("div", { class: "rf-group" }, [
-          ui.el("p", { class: "rf-group-title", text: "Identidad" }),
-          ui.field({ label: "Título", control: titleInput, error: s.errors.title, required: true }),
-          ui.field({ label: "Descripción (opcional)", control: descriptionInput }),
+          ui.el("p", { class: "rf-group-title", text: t("goals.form.group.identity") }),
+          ui.field({
+            label: t("goals.form.label.title"),
+            control: titleInput,
+            error: s.errors.title,
+            required: true,
+          }),
+          ui.field({ label: t("goals.form.label.description"), control: descriptionInput }),
         ]),
         ui.el("div", { class: "rf-group" }, [
-          ui.el("p", { class: "rf-group-title", text: "Meta y progreso" }),
+          ui.el("p", { class: "rf-group-title", text: t("goals.form.group.numbers") }),
           ui.el("div", { class: "goals-numbers" }, [
             ui.field({
-              label: "Año",
+              label: t("goals.form.label.year"),
               control: yearInput,
               error: s.errors.year,
-              hint: "Año calendario del objetivo.",
+              hint: t("goals.form.hint.year"),
               required: true,
             }),
             ui.field({
-              label: "Meta",
+              label: t("goals.form.label.target"),
               control: targetInput,
               error: s.errors.target,
-              hint: "Valor objetivo (ej: 500 km, 12 libros…)",
+              hint: t("goals.form.hint.target"),
               required: true,
             }),
             ui.field({
-              label: "Progreso inicial",
+              label: t("goals.form.label.progress"),
               control: progressInput,
               error: s.errors.progress,
-              hint: "Entero mayor o igual a 0.",
+              hint: t("goals.form.hint.progress"),
               required: true,
             }),
           ]),
         ]),
         ui.el("div", { class: "rf-group" }, [
-          ui.el("p", { class: "rf-group-title", text: "Apariencia y vínculos" }),
-          ui.field({ label: "Color", control: colorRow, error: s.errors.color, required: true }),
+          ui.el("p", { class: "rf-group-title", text: t("goals.form.group.appearance") }),
+          ui.field({
+            label: t("goals.form.label.color"),
+            control: colorRow,
+            error: s.errors.color,
+            required: true,
+          }),
           buildGoalLinksPicker(),
         ]),
         formErrorNode,
         ui.el("div", { class: "rf-actions" }, [
           ui.el("button", { type: "submit", class: "btn btn-primary" }, [
             ui.icon("save", { size: 17 }),
-            "Guardar",
+            t("common.save"),
           ]),
           ui.el("button", {
             type: "button",
             class: "btn btn-ghost",
-            text: "Cancelar",
+            text: t("common.cancel"),
             onclick: function () {
               closeGoalForm();
               rerender();
@@ -1712,7 +1971,7 @@ window.MiRutina = window.MiRutina || {};
       grid.appendChild(
         ui.el("p", {
           class: "goal-links-hint",
-          text: "Aún no hay rutinas; podrás vincularlas más tarde desde la pantalla de rutinas.",
+          text: t("goals.form.links.empty"),
         })
       );
     } else {
@@ -1743,11 +2002,15 @@ window.MiRutina = window.MiRutina || {};
       });
     }
     return ui.el("fieldset", { class: "goal-links" }, [
-      ui.el("legend", { class: "goal-links-legend", id: "goal-links-legend", text: "Rutinas vinculadas" }),
+      ui.el("legend", {
+        class: "goal-links-legend",
+        id: "goal-links-legend",
+        text: t("goals.form.links.legend"),
+      }),
       grid,
       ui.el("p", {
         class: "goal-links-hint",
-        text: "Elegí qué rutinas aportan a este objetivo. Marcar una rutina vinculada suma +1 y desmarcarla resta −1.",
+        text: t("goals.form.links.hint"),
       }),
     ]);
   }
@@ -1773,10 +2036,10 @@ window.MiRutina = window.MiRutina || {};
       errors.title = titleResult.message;
     }
     if (!Number.isInteger(parseGoalInteger(s.year))) {
-      errors.year = "El año debe ser un número entero.";
+      errors.year = t("goals.form.error.year");
     }
     if (!HEX_COLOR_PATTERN.test(s.color)) {
-      errors.color = "Introduce un color en formato #RRGGBB.";
+      errors.color = t("goals.form.error.color");
     }
     // Aísla cada campo: meta fija válida para probar solo el progreso y
     // progreso 0 (siempre válido) para probar solo la meta.
@@ -1833,13 +2096,13 @@ window.MiRutina = window.MiRutina || {};
   /** Validación en runtime antes de persistir. */
   function validateGoalAgainst(goal) {
     if (goal.title.trim() === "") {
-      return { ok: false, message: "El título es obligatorio." };
+      return { ok: false, message: t("goals.form.error.title") };
     }
     if (!Number.isInteger(goal.year)) {
-      return { ok: false, message: "El año debe ser un número entero." };
+      return { ok: false, message: t("goals.form.error.year") };
     }
     if (!HEX_COLOR_PATTERN.test(goal.color)) {
-      return { ok: false, message: "Color inválido: usa el formato #RRGGBB." };
+      return { ok: false, message: t("goals.form.error.colorInvalid") };
     }
     var numbers = domain.validateGoal({ target: goal.target, progress: goal.progress });
     if (!numbers.ok) {
@@ -1862,7 +2125,7 @@ window.MiRutina = window.MiRutina || {};
       notifyWriteError(saved);
       return {
         ok: false,
-        message: "No se pudo guardar: " + saved.error.message,
+        message: t("error.saveFailed", { message: saved.error.message }),
         error: saved.error,
       };
     }
@@ -1890,13 +2153,13 @@ window.MiRutina = window.MiRutina || {};
     if (!result.ok) {
       return result;
     }
-    return { ok: true, message: "Objetivo «" + goal.title + "» creado." };
+    return { ok: true, message: t("goals.created", { title: goal.title }) };
   }
 
   function updateGoal(id, input) {
     var previous = goalById(id);
     if (!previous) {
-      return { ok: false, message: "El objetivo ya no existe." };
+      return { ok: false, message: t("goals.missing") };
     }
     var goal = Object.assign({}, previous, {
       title: input.title,
@@ -1918,14 +2181,14 @@ window.MiRutina = window.MiRutina || {};
     if (!result.ok) {
       return result;
     }
-    return { ok: true, message: "Objetivo «" + goal.title + "» actualizado." };
+    return { ok: true, message: t("goals.updated", { title: goal.title }) };
   }
 
   /** Elimina el objetivo; no toca el progreso de ningún otro. */
   function deleteGoal(id) {
     var goal = goalById(id);
     if (!goal) {
-      return { ok: false, message: "El objetivo ya no existe." };
+      return { ok: false, message: t("goals.missing") };
     }
     var nextGoals = state.goals.filter(function (item) {
       return item.id !== id;
@@ -1934,7 +2197,7 @@ window.MiRutina = window.MiRutina || {};
     if (!result.ok) {
       return result;
     }
-    return { ok: true, message: "Objetivo «" + goal.title + "» eliminado." };
+    return { ok: true, message: t("goals.deleted", { title: goal.title }) };
   }
 
   /**
@@ -1948,7 +2211,7 @@ window.MiRutina = window.MiRutina || {};
     }
     var goal = goalById(id);
     if (!goal) {
-      return { ok: false, message: "El objetivo ya no existe." };
+      return { ok: false, message: t("goals.missing") };
     }
     var before = goal.progress;
     var updated = domain.applyManualAdjust(goal, check.value);
@@ -1965,11 +2228,13 @@ window.MiRutina = window.MiRutina || {};
   /** Feedback del ajuste; sin cambio es porque ya estaba en el suelo 0. */
   function describeGoalAdjust(title, before, after, delta) {
     if (after === before) {
-      return "El progreso de «" + title + "» ya está en 0 (suelo mínimo).";
+      return t("goals.manual.floor", { title: title });
     }
-    return (
-      "Progreso de «" + title + "»: " + after + " (" + (delta > 0 ? "+" : "") + delta + ")."
-    );
+    return t("goals.manual.adjusted", {
+      title: title,
+      after: after,
+      delta: i18n.signedNumber(delta),
+    });
   }
 
   /**
@@ -1978,15 +2243,15 @@ window.MiRutina = window.MiRutina || {};
    */
   function askDeleteGoal(goal) {
     var body = ui.el("div", {}, [
-      ui.el("p", {}, ["Vas a eliminar ", ui.el("strong", { text: goal.title }), "."]),
+      ui.el("p", { text: t("goals.delete.intro", { name: goal.title }) }),
       ui.el("p", {
-        text: "Se eliminará el objetivo con su progreso; las rutinas vinculadas no se modifican.",
+        text: t("goals.delete.body"),
       }),
     ]);
     ui.confirmDialog({
-      title: "Eliminar objetivo",
+      title: t("goals.delete.title"),
       body: body,
-      confirmLabel: "Eliminar",
+      confirmLabel: t("common.delete"),
       tone: "danger",
     }).then(function (confirmed) {
       if (!confirmed) return;
@@ -2058,13 +2323,13 @@ window.MiRutina = window.MiRutina || {};
         tabindex: "-1",
       },
       [
-        ui.el("h2", { class: "dialog-title", id: "settings-title", text: "Ajustes" }),
+        ui.el("h2", { class: "dialog-title", id: "settings-title", text: t("settings.title") }),
         ui.el("div", { class: "dialog-body" }, [body]),
         ui.el("div", { class: "dialog-actions" }, [
           ui.el("button", {
             type: "button",
             class: "btn btn-secondary",
-            text: "Cerrar",
+            text: t("common.close"),
             onclick: closeSettings,
           }),
         ]),
@@ -2132,7 +2397,9 @@ window.MiRutina = window.MiRutina || {};
   function buildThemeRow() {
     var label = ui.el("span", { class: "settings-row-label" });
     function paint() {
-      label.textContent = "Tema actual: " + (state.theme === "light" ? "claro" : "oscuro");
+      label.textContent = t("settings.theme.current", {
+        theme: t(state.theme === "light" ? "settings.theme.light" : "settings.theme.dark"),
+      });
     }
     paint();
     return ui.el("div", { class: "settings-row" }, [
@@ -2140,7 +2407,7 @@ window.MiRutina = window.MiRutina || {};
       ui.el("button", {
         type: "button",
         class: "btn btn-secondary btn-sm",
-        text: "Cambiar tema",
+        text: t("settings.theme.change"),
         onclick: function () {
           toggleTheme();
           paint();
@@ -2164,9 +2431,7 @@ window.MiRutina = window.MiRutina || {};
       children.push(
         ui.el("p", {
           class: "settings-locked",
-          text:
-            "Estos datos fueron creados por una versión más nueva de la app: " +
-            "no se leen ni se escriben. Elige una salida:",
+          text: t("settings.locked.notice"),
         })
       );
       children.push(
@@ -2175,7 +2440,7 @@ window.MiRutina = window.MiRutina || {};
             id: "settings-export-raw",
             type: "button",
             class: "btn btn-primary",
-            text: "Exportar JSON crudo",
+            text: t("settings.exportRaw"),
             onclick: function () {
               exportData(true);
             },
@@ -2184,7 +2449,7 @@ window.MiRutina = window.MiRutina || {};
             id: "settings-clear",
             type: "button",
             class: "btn btn-danger",
-            text: "Vaciar todos los datos",
+            text: t("settings.clear"),
             onclick: askClearAll,
           }),
         ])
@@ -2193,42 +2458,108 @@ window.MiRutina = window.MiRutina || {};
       children.push(
         ui.el("p", {
           class: "settings-hint",
-          text:
-            "Los datos viven en este navegador: copiar la carpeta no los " +
-            "transporta. Exporta un backup para moverlos a otro equipo.",
+          text: t("settings.hint"),
         })
       );
-      children.push(ui.el("p", { class: "settings-section-title", text: "Copia de seguridad" }));
+      children.push(
+        ui.el("p", { class: "settings-section-title", text: t("settings.section.backup") })
+      );
       children.push(
         ui.el("div", { class: "settings-actions" }, [
           ui.el("button", {
             id: "settings-export",
             type: "button",
             class: "btn btn-primary",
-            text: "Exportar backup JSON",
+            text: t("settings.exportBackup"),
             onclick: function () {
               exportData(false);
             },
           }),
         ])
       );
-      children.push(ui.el("p", { class: "settings-section-title", text: "Restaurar desde un fichero" }));
+      children.push(buildBackupReminderRow());
+      children.push(
+        ui.el("p", { class: "settings-section-title", text: t("settings.section.restore") })
+      );
       children.push(buildImportRow());
-      children.push(ui.el("p", { class: "settings-section-title", text: "Zona de peligro" }));
+      children.push(
+        ui.el("p", { class: "settings-section-title", text: t("settings.section.danger") })
+      );
       children.push(
         ui.el("div", { class: "settings-actions" }, [
           ui.el("button", {
             id: "settings-clear",
             type: "button",
             class: "btn btn-danger",
-            text: "Vaciar todos los datos",
+            text: t("settings.clear"),
             onclick: askClearAll,
           }),
         ])
       );
     }
     children.push(errorNode);
-    return ui.el("section", { class: "settings-section", "aria-label": "Datos" }, children);
+    return ui.el("section", { class: "settings-section", "aria-label": t("settings.data.aria") }, children);
+  }
+
+  // Frecuencias del recordatorio expuestas en Ajustes (0 = nunca).
+  var BACKUP_REMINDER_TABS = [
+    { id: "7", key: "settings.reminder.tab.7" },
+    { id: "14", key: "settings.reminder.tab.14" },
+    { id: "30", key: "settings.reminder.tab.30" },
+    { id: "never", key: "settings.reminder.tab.never" },
+  ];
+
+  /** "nunca" o "cada N días". */
+  function reminderFrequencyText(days) {
+    return days === 0
+      ? t("settings.reminder.freq.never")
+      : t("settings.reminder.freq.every", { days: days });
+  }
+
+  /**
+   * Fila de Ajustes: frecuencia del recordatorio y estado del último backup.
+   * Cambiarla persiste al instante y reevalúa el aviso.
+   */
+  function buildBackupReminderRow() {
+    var label = ui.el("p", { class: "settings-row-label" });
+    function paint() {
+      label.textContent = t("settings.reminder.label", {
+        freq: reminderFrequencyText(backupState.reminderDays),
+        last:
+          backupState.lastExport === null
+            ? t("common.never")
+            : formatShortNumericDate(isoToDate(backupState.lastExport)),
+      });
+    }
+    paint();
+
+    var tabs = ui.tabs({
+      items: tabItems(BACKUP_REMINDER_TABS),
+      value: backupState.reminderDays === 0 ? "never" : String(backupState.reminderDays),
+      ariaLabel: t("settings.reminder.aria"),
+      onChange: function (id) {
+        var days = id === "never" ? 0 : Number(id);
+        var saved = storage.saveBackupPrefs({
+          reminderDays: days,
+          dismissedAt: backupState.dismissedAt,
+        });
+        if (!saved.ok) {
+          showSettingsError(
+            t("settings.reminder.saveFailed", { message: saved.error.message })
+          );
+          return;
+        }
+        backupState.reminderDays = saved.value.reminderDays;
+        paint();
+        syncBackupBanner();
+        ui.toast({
+          message: t("settings.reminder.changed", { freq: reminderFrequencyText(days) }),
+          variant: "info",
+        });
+      },
+    });
+
+    return ui.el("div", { class: "settings-row settings-row-column" }, [label, tabs]);
   }
 
   function buildImportRow() {
@@ -2249,7 +2580,7 @@ window.MiRutina = window.MiRutina || {};
       ui.el("label", {
         class: "settings-import-label",
         htmlFor: "settings-import",
-        text: "Elegir fichero de backup (.json)",
+        text: t("settings.import.label"),
       }),
       input,
     ]);
@@ -2268,15 +2599,25 @@ window.MiRutina = window.MiRutina || {};
   function exportData(raw) {
     var result = raw ? storage.exportRaw() : storage.exportAll();
     if (!result.ok) {
-      showSettingsError("No se pudo exportar: " + result.error.message);
+      showSettingsError(t("settings.exportFailed", { message: result.error.message }));
       return;
     }
     var name = raw
       ? RAW_BACKUP_PREFIX + today() + ".json"
       : storage.backupFileName(today());
     downloadText(result.value, name);
+    if (!raw) {
+      // El backup exportado es la nueva referencia del recordatorio.
+      var saved = storage.saveLastExport(new Date().toISOString());
+      if (saved.ok) {
+        backupState.lastExport = saved.value;
+      } else {
+        notifyWriteError(saved);
+      }
+      syncBackupBanner();
+    }
     ui.toast({
-      message: (raw ? "JSON crudo exportado: " : "Backup exportado: ") + name,
+      message: t(raw ? "settings.exportRawDone" : "settings.exportDone", { name: name }),
       variant: "success",
     });
   }
@@ -2302,12 +2643,12 @@ window.MiRutina = window.MiRutina || {};
     if (!file) return;
     var reader = new FileReader();
     reader.onerror = function () {
-      showSettingsError("No se pudo leer el fichero seleccionado.");
+      showSettingsError(t("settings.readFailed"));
     };
     reader.onload = function () {
       var parsed = storage.parseBackup(String(reader.result));
       if (!parsed.ok) {
-        showSettingsError("No se importó nada: " + parsed.error.message);
+        showSettingsError(t("settings.importFailed", { message: parsed.error.message }));
         return;
       }
       askImportConfirmation(parsed.value, file.name);
@@ -2316,45 +2657,40 @@ window.MiRutina = window.MiRutina || {};
   }
 
   function describeCounts(routines, entries, goals) {
-    return (
-      routines.length +
-      " rutinas, " +
-      entries.length +
-      " registros y " +
-      goals.length +
-      " objetivos"
-    );
+    return t("import.count.all", {
+      routines: plural("import.count.routines", routines.length),
+      entries: plural("import.count.entries", entries.length),
+      goals: plural("import.count.goals", goals.length),
+    });
   }
 
   /** La confirmación advierte la sobrescritura total con sus alcances. */
   function askImportConfirmation(backup, fileName) {
     settings.suspended = true;
     var body = ui.el("div", {}, [
-      ui.el("p", {}, ["Vas a importar ", ui.el("strong", { text: fileName }), "."]),
+      ui.el("p", { text: t("import.intro", { file: fileName }) }),
       ui.el("p", {
-        text:
-          "Se sobrescribirán todos los datos actuales (" +
-          describeCounts(state.routines, state.entries, state.goals) +
-          ") por los del fichero (" +
-          describeCounts(backup.routines, backup.completions, backup.goals) +
-          "). Esta acción no se puede deshacer.",
+        text: t("import.body", {
+          current: describeCounts(state.routines, state.entries, state.goals),
+          next: describeCounts(backup.routines, backup.completions, backup.goals),
+        }),
       }),
-      ui.el("p", { text: "Cancelar o un fichero inválido no cambian nada." }),
+      ui.el("p", { text: t("import.safe") }),
     ]);
     ui.confirmDialog({
-      title: "Importar backup",
+      title: t("import.title"),
       body: body,
-      confirmLabel: "Importar y sobrescribir",
+      confirmLabel: t("import.confirm"),
       tone: "danger",
     }).then(function (confirmed) {
       settings.suspended = false;
       if (!confirmed) {
-        ui.toast({ message: "Importación cancelada: no cambió nada.", variant: "info" });
+        ui.toast({ message: t("import.cancelled"), variant: "info" });
         return;
       }
       var result = storage.importAll(backup);
       if (!result.ok) {
-        showSettingsError("No se pudo importar: " + result.error.message);
+        showSettingsError(t("import.failed", { message: result.error.message }));
         return;
       }
       // todas las colecciones de golpe + re-render sin recargar.
@@ -2364,11 +2700,11 @@ window.MiRutina = window.MiRutina || {};
       closeSettings();
       resetScreenState();
       rerender();
+      syncBackupBanner();
       ui.toast({
-        message:
-          "Backup importado (" +
-          describeCounts(backup.routines, backup.completions, backup.goals) +
-          ").",
+        message: t("import.done", {
+          counts: describeCounts(backup.routines, backup.completions, backup.goals),
+        }),
         variant: "success",
       });
     });
@@ -2378,19 +2714,16 @@ window.MiRutina = window.MiRutina || {};
   function askClearAll() {
     settings.suspended = true;
     ui.confirmDialog({
-      title: "Vaciar todos los datos",
+      title: t("clear.title"),
       body: ui.el("div", {}, [
         ui.el("p", {}, [
-          "Se eliminarán ",
-          ui.el("strong", { text: "todas" }),
-          " las rutinas, registros, objetivos y preferencias guardados en este navegador.",
+          t("clear.lead"),
+          ui.el("strong", { text: t("clear.all") }),
+          t("clear.tail"),
         ]),
-        ui.el("p", {
-          text:
-            "No hay copia remota: exporta un backup antes si quieres conservar los datos.",
-        }),
+        ui.el("p", { text: t("clear.noRemote") }),
       ]),
-      confirmLabel: "Continuar",
+      confirmLabel: t("clear.continue"),
       tone: "danger",
     }).then(function (first) {
       if (!first) {
@@ -2398,21 +2731,16 @@ window.MiRutina = window.MiRutina || {};
         return;
       }
       ui.confirmDialog({
-        title: "Última confirmación",
+        title: t("clear.title2"),
         body: ui.el("div", {}, [
+          ui.el("p", { text: t("clear.undoable") }),
           ui.el("p", {
-            text:
-              "Esta acción no se puede deshacer: se borrarán todas las claves mirutina.* de este navegador.",
-          }),
-          ui.el("p", {}, [
-            "¿Vaciar ahora ",
-            ui.el("strong", {
-              text: describeCounts(state.routines, state.entries, state.goals),
+            text: t("clear.ask", {
+              counts: describeCounts(state.routines, state.entries, state.goals),
             }),
-            "?",
-          ]),
+          }),
         ]),
-        confirmLabel: "Sí, vaciar todo",
+        confirmLabel: t("clear.confirm"),
         tone: "danger",
       }).then(function (second) {
         settings.suspended = false;
@@ -2425,7 +2753,7 @@ window.MiRutina = window.MiRutina || {};
   function clearAllData() {
     var result = storage.clearAll();
     if (!result.ok) {
-      showSettingsError("No se pudieron vaciar los datos: " + result.error.message);
+      showSettingsError(t("clear.failed", { message: result.error.message }));
       return;
     }
     reloadState();
@@ -2435,7 +2763,8 @@ window.MiRutina = window.MiRutina || {};
     resetScreenState();
     // Con el esquema vacío se sale del modo bloqueo.
     rerender();
-    ui.toast({ message: "Datos vaciados: la app empieza de cero.", variant: "success" });
+    syncBackupBanner();
+    ui.toast({ message: t("clear.done"), variant: "success" });
   }
 
   // ---- Historial ---------------------
@@ -2447,15 +2776,10 @@ window.MiRutina = window.MiRutina || {};
   /** Semana visible en Historial; null = semana de hoy. Se limpia al cambiar de ruta. */
   var historyAnchor = null;
 
-  var HISTORY_WEEKDAY_TITLES = {
-    1: "Lunes",
-    2: "Martes",
-    3: "Miércoles",
-    4: "Jueves",
-    5: "Viernes",
-    6: "Sábado",
-    7: "Domingo",
-  };
+  /** Título de la tarjeta de día: "Lunes" / "Monday". */
+  function historyWeekdayTitle(weekday) {
+    return i18n.capitalize(i18n.weekdayLong(weekday));
+  }
 
   function renderHistorial(container) {
     var hoy = today();
@@ -2469,6 +2793,10 @@ window.MiRutina = window.MiRutina || {};
     page.appendChild(renderHistoryHeader(range));
     page.appendChild(renderHistorySummary(range, percent, futureWeek, hoy));
     page.appendChild(renderHistoryDays(range, hoy));
+    // Sin rutinas no hay nada que marcar: el estado vacío ya cubre la pantalla.
+    if (state.routines.length > 0) {
+      page.appendChild(renderRetroCalendar(hoy));
+    }
     page.appendChild(renderHistoryJump());
     container.appendChild(page);
   }
@@ -2476,35 +2804,35 @@ window.MiRutina = window.MiRutina || {};
   function renderHistoryHeader(range) {
     return revealWrap(
       ui.el("header", { class: "hist-header" }, [
-        ui.el("h1", { class: "hist-title" }, [ui.icon("calendar", { size: 28 }), "Historial"]),
+        ui.el("h1", { class: "hist-title" }, [ui.icon("calendar", { size: 28 }), t("hist.title")]),
         // navegación como grupo segmentado con iconos.
         ui.el(
           "div",
-          { class: "segmented", role: "group", "aria-label": "Navegación de semanas" },
+          { class: "segmented", role: "group", "aria-label": t("hist.weekNav") },
           [
             ui.el(
               "button",
               {
                 type: "button",
                 class: "segmented-btn",
-                "aria-label": "Semana anterior",
+                "aria-label": t("hist.prevWeek"),
                 onclick: function () {
                   changeHistoryAnchor(domain.addDays(range.start, -7));
                 },
               },
-              [ui.icon("chevron-left", { size: 16 }), "Anterior"]
+              [ui.icon("chevron-left", { size: 16 }), t("common.previous")]
             ),
             ui.el(
               "button",
               {
                 type: "button",
                 class: "segmented-btn",
-                "aria-label": "Semana siguiente",
+                "aria-label": t("hist.nextWeek"),
                 onclick: function () {
                   changeHistoryAnchor(domain.addDays(range.start, 7));
                 },
               },
-              ["Siguiente", ui.icon("chevron-right", { size: 16 })]
+              [t("common.next"), ui.icon("chevron-right", { size: 16 })]
             ),
           ]
         ),
@@ -2533,25 +2861,29 @@ window.MiRutina = window.MiRutina || {};
   /** "Semana del … al …", conteo, % grande y barra del semáforo. */
   function renderHistorySummary(range, percent, futureWeek, hoy) {
     var counts = periodCountsForRange(range, hoy);
+    var shieldYear = domain.yearOf(range.start);
+    var shieldsLeft = domain.shieldsRemaining(state.shields, shieldYear);
     var body = futureWeek
       ? ui.el("p", {
           class: "hist-summary-empty",
-          text: "Sin datos todavía (semana futura)",
+          text: t("hist.futureWeek"),
         })
       : [
           ui.el("div", { class: "hist-summary-top" }, [
             ui.el("div", {}, [
               ui.el("h2", {
                 class: "hist-summary-title",
-                text:
-                  "Semana del " +
-                  formatShortNumericDate(range.start) +
-                  " al " +
-                  formatShortNumericDate(range.end),
+                text: t("hist.summary.title", {
+                  start: formatShortNumericDate(range.start),
+                  end: formatShortNumericDate(range.end),
+                }),
               }),
               ui.el("p", {
                 class: "hist-summary-counts",
-                text: counts.completed + " de " + counts.scheduled + " rutinas cumplidas",
+                text: plural("hist.summary.counts", counts.scheduled, {
+                  done: counts.completed,
+                  total: counts.scheduled,
+                }),
               }),
             ]),
             ui.el("p", {
@@ -2562,18 +2894,28 @@ window.MiRutina = window.MiRutina || {};
           ]),
           ui.progressBar({
             value: percent,
-            label: "Cumplimiento de la semana",
+            label: t("hist.summary.progress"),
             size: "lg",
             color: semaphoreCss(percent),
           }),
           ui.el("p", {
             class: "hist-summary-hint",
-            text: "Los días futuros no puntúan ni penalizan (semana de lunes a domingo).",
+            text: t("hist.summary.hint"),
           }),
+          // escudos del año natural visible: días libres que no rompen la racha.
+          ui.el("p", { class: "hist-summary-shields" }, [
+            ui.icon("shield", { size: 15 }),
+            " " +
+              t("hist.summary.shields", {
+                left: shieldsLeft,
+                max: domain.MAX_SHIELDS_PER_YEAR,
+                year: shieldYear,
+              }),
+          ]),
         ];
 
     return revealWrap(
-      ui.el("section", { class: "hist-summary card", "aria-label": "Resumen de la semana" }, body),
+      ui.el("section", { class: "hist-summary card", "aria-label": t("hist.summary.aria") }, body),
       60
     );
   }
@@ -2597,12 +2939,12 @@ window.MiRutina = window.MiRutina || {};
     if (state.routines.length === 0) {
       body = ui.emptyState({
         icon: "🗓️",
-        title: "Aún no hay rutinas",
-        description: "Crea rutinas para empezar a registrar su cumplimiento y verlo aquí.",
+        title: t("hist.empty.title"),
+        description: t("hist.empty.description"),
         actions: ui.el("a", {
           class: "btn btn-secondary btn-sm",
           href: "#/rutinas",
-          text: "Ir a Rutinas",
+          text: t("hist.empty.action"),
         }),
       });
     } else {
@@ -2613,7 +2955,7 @@ window.MiRutina = window.MiRutina || {};
       body = grid;
     }
     return revealWrap(
-      ui.el("section", { class: "hist-section", "aria-label": "Días de la semana" }, [body]),
+      ui.el("section", { class: "hist-section", "aria-label": t("hist.days.aria") }, [body]),
       120
     );
   }
@@ -2630,7 +2972,7 @@ window.MiRutina = window.MiRutina || {};
     var schedule = domain.scheduleForDate(state.routines, date, hoy);
     var dayEntries = domain.entriesForDate(state.entries, date);
     var completion = domain.dayCompletion(dayEntries, schedule);
-    var title = HISTORY_WEEKDAY_TITLES[weekday];
+    var title = historyWeekdayTitle(weekday);
 
     var children = [
       ui.el("header", { class: "hist-card-head" }, [
@@ -2649,19 +2991,19 @@ window.MiRutina = window.MiRutina || {};
           ? ui.el("span", {
               class: "hist-indicator-dash",
               role: "img",
-              "aria-label": "sin registrar (día futuro)",
+              "aria-label": t("hist.indicator.future"),
               text: "—",
             })
           : marked
             ? ui.icon("check-circle-fill", {
                 size: 18,
                 className: "hist-indicator-icon hist-ok",
-                label: "cumplida",
+                label: t("hist.indicator.done"),
               })
             : ui.icon("x-circle-fill", {
                 size: 18,
                 className: "hist-indicator-icon hist-ko",
-                label: "no cumplida",
+                label: t("hist.indicator.missed"),
               });
         list.appendChild(
           ui.el("li", { class: "hist-item" }, [
@@ -2694,14 +3036,402 @@ window.MiRutina = window.MiRutina || {};
       );
     }
 
+    var shieldRow = historyShieldRow(date, isFuture, schedule.length > 0);
+    if (shieldRow) {
+      children.push(shieldRow);
+    }
+
     return ui.el(
       "article",
       {
         class: isToday ? "hist-card hist-card-today" : "hist-card",
-        "aria-label":
-          title + " " + formatDayShort(date) + (isToday ? " (hoy)" : ""),
+        "aria-label": isToday
+          ? t("hist.day.ariaToday", { title: title, date: formatDayShort(date) })
+          : t("hist.day.aria", { title: title, date: formatDayShort(date) }),
       },
       children
+    );
+  }
+
+  /**
+   * Fila de escudo de una tarjeta de día: con escudo → pill + "Quitar";
+   * sin escudo y con rutinas programadas → "Aplicar escudo" (deshabilitado
+   * sin cupo en el año). Los días futuros no llevan fila.
+   * @returns {HTMLElement|null}
+   */
+  function historyShieldRow(date, isFuture, hasSchedule) {
+    if (isFuture) {
+      return null;
+    }
+    var shielded = domain.hasShield(state.shields, date);
+    if (!shielded && !hasSchedule) {
+      return null;
+    }
+    if (shielded) {
+      return ui.el("div", { class: "hist-shield-row" }, [
+        ui.el("span", { class: "pill pill-shield" }, [
+          ui.icon("shield", { size: 13 }),
+          t("shield.dayPill"),
+        ]),
+        ui.el("button", {
+          type: "button",
+          class: "btn btn-ghost btn-sm",
+          "aria-label": t("shield.remove.aria", { date: formatShortNumericDate(date) }),
+          text: t("shield.remove"),
+          onclick: function () {
+            toggleShield(date);
+          },
+        }),
+      ]);
+    }
+    var year = domain.yearOf(date);
+    var shieldsLeft = domain.shieldsRemaining(state.shields, year);
+    var noRoom = shieldsLeft === 0;
+    return ui.el("div", { class: "hist-shield-row" }, [
+      ui.el("button", {
+        type: "button",
+        class: "btn btn-secondary btn-sm",
+        disabled: noRoom,
+        title: noRoom ? t("shield.noneLeft", { year: year }) : t("shield.protects"),
+        "aria-label": t("shield.apply.aria", { date: formatShortNumericDate(date) }),
+        onclick: function () {
+          toggleShield(date);
+        },
+      }, [ui.icon("shield", { size: 15 }), t("shield.apply")]),
+      ui.el("span", {
+        class: "hist-shield-left",
+        text: t("shield.left", {
+          left: shieldsLeft,
+          max: domain.MAX_SHIELDS_PER_YEAR,
+          year: year,
+        }),
+      }),
+    ]);
+  }
+
+  /**
+   * Aplica o retira el escudo de un día (presente o pasado): valida el cupo
+   * del año, persiste al instante y revierte con aviso si la escritura falla.
+   */
+  function toggleShield(date) {
+    checkMidnight();
+    var hoy = today();
+    if (domain.isFuture(date, hoy)) {
+      ui.toast({ message: t("toast.shield.future"), variant: "error" });
+      return { ok: false };
+    }
+    var had = domain.hasShield(state.shields, date);
+    var result = had
+      ? domain.removeShield(state.shields, date)
+      : domain.addShield(state.shields, date, hoy);
+    if (!result.ok) {
+      ui.toast({ message: result.message, variant: "error" });
+      return { ok: false };
+    }
+    var saved = storage.saveCollection("shields", result.value);
+    if (!saved.ok) {
+      notifyWriteError(saved);
+      return { ok: false, error: saved.error };
+    }
+    state.shields = result.value;
+    rerender();
+    ui.toast({
+      message: had
+        ? t("toast.shield.removed", { date: formatShortNumericDate(date) })
+        : t("toast.shield.applied", { date: formatShortNumericDate(date) }),
+      variant: "success",
+    });
+    return { ok: true };
+  }
+
+  // ---- Registro retroactivo: mini calendario del mes.
+  // Marca/desmarca días pasados sin ir día a día por el registro. El mes
+  // visible y el día elegido sobreviven a los re-render de datos; el cambio de
+  // ruta los limpia, como el resto del estado efímero de pantalla.
+
+  /** Primer día del mes visible del calendario; `null` = mes de hoy. */
+  var calendarMonth = null;
+  /** Día elegido en el calendario; `null` = ninguno. */
+  var calendarDate = null;
+
+  /** "Octubre de 2026" / "October 2026" a partir de "YYYY-MM-01". */
+  function formatMonthTitle(month) {
+    return i18n.monthTitle(month);
+  }
+
+  /** "jueves 8 de octubre" / "Thursday, October 8" (nombre accesible). */
+  function formatCalendarDate(date) {
+    return i18n.calendarDate(date);
+  }
+
+  /** Mes visible del calendario, siempre canónico ("YYYY-MM-01"). */
+  function calendarMonthAnchor(hoy) {
+    return calendarMonth === null ? hoy.slice(0, 8) + "01" : calendarMonth;
+  }
+
+  /**
+   * Estado visual de un día: futuro, anterior a las rutinas, sin programar,
+   * vacío, parcial o completo; el escudo viaja aparte como marca.
+   */
+  function calendarDayState(date, hoy, oldestCreation) {
+    if (domain.isFuture(date, hoy)) {
+      return { kind: "future", shielded: false };
+    }
+    if (oldestCreation !== null && domain.compareDates(date, oldestCreation) < 0) {
+      return { kind: "muted", shielded: false };
+    }
+    var schedule = domain.scheduleForDate(state.routines, date, hoy);
+    if (schedule.length === 0) {
+      return { kind: "none", shielded: domain.hasShield(state.shields, date) };
+    }
+    var completion = domain.dayCompletion(domain.entriesForDate(state.entries, date), schedule);
+    return {
+      kind: completion.percent >= 100 ? "full" : completion.completedCount > 0 ? "partial" : "empty",
+      shielded: domain.hasShield(state.shields, date),
+      completion: completion,
+    };
+  }
+
+  /** Texto del nombre accesible de una celda ("3 de 4 cumplidas"). */
+  function calendarCellSummary(dayState) {
+    if (dayState.kind === "future") return t("cal.state.future");
+    if (dayState.kind === "muted") return t("cal.state.muted");
+    if (dayState.kind === "none") {
+      return t(dayState.shielded ? "cal.state.noneShielded" : "cal.state.none");
+    }
+    var text = t("cal.state.counts", {
+      done: dayState.completion.completedCount,
+      total: dayState.completion.scheduledCount,
+    });
+    if (dayState.kind === "full") text = t("cal.state.full", { rest: text });
+    if (dayState.shielded) text += t("cal.state.shielded");
+    return text;
+  }
+
+  /** Celda de un día: número + marca de escudo; solo pulsable si es registrable. */
+  function calendarCell(date, hoy, oldestCreation) {
+    if (date === null) {
+      return ui.el("span", { class: "cal-cell cal-cell-pad", "aria-hidden": "true" });
+    }
+    var dayState = calendarDayState(date, hoy, oldestCreation);
+    var classes = ["cal-cell", "cal-cell-" + dayState.kind];
+    if (date === hoy) classes.push("cal-cell-today");
+    if (date === calendarDate) classes.push("cal-cell-selected");
+    return ui.el(
+      "button",
+      {
+        type: "button",
+        class: classes.join(" "),
+        "aria-label": formatCalendarDate(date) + ": " + calendarCellSummary(dayState),
+        "aria-pressed": date === calendarDate ? "true" : "false",
+        disabled: dayState.kind === "future" || dayState.kind === "muted",
+        onclick: function () {
+          selectCalendarDate(date);
+        },
+      },
+      [
+        ui.el("span", { class: "cal-day-number", text: String(Number(date.slice(8, 10))) }),
+        dayState.shielded
+          ? ui.icon("shield", { size: 11, className: "cal-day-shield", label: t("cal.shield.label") })
+          : null,
+      ]
+    );
+  }
+
+  /** Elegir un día (volver a pulsarlo lo cierra) y repintar. */
+  function selectCalendarDate(date) {
+    calendarDate = calendarDate === date ? null : date;
+    rerender();
+  }
+
+  /** Cambia de mes sin pasar del actual: lo futuro no se registra. */
+  function changeCalendarMonth(hoy, delta) {
+    var next = domain.addMonths(calendarMonthAnchor(hoy), delta);
+    if (domain.compareDates(next, hoy.slice(0, 8) + "01") > 0) {
+      return;
+    }
+    calendarMonth = next;
+    calendarDate = null;
+    rerender();
+  }
+
+  /** Leyenda de estados: el color acompaña al texto, nunca informa solo. */
+  function calendarLegend() {
+    var items = [
+      { kind: "full", text: t("cal.legend.full") },
+      { kind: "partial", text: t("cal.legend.partial") },
+      { kind: "empty", text: t("cal.legend.empty") },
+      { kind: "none", text: t("cal.legend.none") },
+    ];
+    return ui.el(
+      "ul",
+      { class: "cal-legend" },
+      items.map(function (item) {
+        return ui.el("li", { class: "cal-legend-item" }, [
+          ui.el("span", {
+            class: "cal-legend-swatch cal-legend-" + item.kind,
+            "aria-hidden": "true",
+          }),
+          item.text,
+        ]);
+      })
+    );
+  }
+
+  /** Panel del día elegido: rutinas programadas con su toggle (misma ruta de marcado). */
+  function calendarDayPanel(date, hoy) {
+    var schedule = domain.scheduleForDate(state.routines, date, hoy);
+    var dayEntries = domain.entriesForDate(state.entries, date);
+    var completion = domain.dayCompletion(dayEntries, schedule);
+    var children = [
+      ui.el("div", { class: "cal-panel-head" }, [
+        ui.el("h3", { class: "cal-panel-title" }, [
+          ui.el("span", { class: "cal-panel-date", text: formatCalendarDate(date) }),
+          completion.percent >= 100
+            ? ui.el("span", { class: "pill cal-panel-pill", text: t("cal.panel.fullDay") })
+            : null,
+          domain.hasShield(state.shields, date)
+            ? ui.el("span", { class: "pill pill-shield" }, [
+              ui.icon("shield", { size: 13 }),
+              t("cal.panel.shieldDay"),
+            ])
+            : null,
+        ]),
+        ui.el("button", {
+          type: "button",
+          class: "btn btn-ghost btn-sm",
+          text: t("common.close"),
+          "aria-label": t("cal.panel.close"),
+          onclick: function () {
+            calendarDate = null;
+            rerender();
+          },
+        }),
+      ]),
+    ];
+
+    if (schedule.length === 0) {
+      children.push(
+        ui.el("p", { class: "cal-panel-empty", text: t("cal.panel.empty") })
+      );
+      return ui.el("div", { class: "cal-panel" }, children);
+    }
+
+    var list = ui.el("ul", { class: "cal-panel-list" });
+    schedule.forEach(function (routine) {
+      list.appendChild(
+        ui.el("li", { class: "cal-panel-item" }, [
+          ui.el("span", {
+            class: "hist-dot",
+            style: { background: routine.color },
+            "aria-hidden": "true",
+          }),
+          ui.checkbox({
+            id: "cal-check-" + routine.id,
+            label: routine.name,
+            checked: domain.isMarked(dayEntries, routine.id),
+            onChange: function () {
+              toggleRoutine(routine.id, date);
+            },
+          }),
+          ui.el("span", { class: "cal-panel-duration", text: domain.formatDuration(routine.durationMinutes) }),
+        ])
+      );
+    });
+    children.push(list);
+    children.push(
+      ui.el("div", { class: "cal-panel-foot" }, [
+        ui.el("span", {
+          text: t("cal.panel.counts", {
+            done: completion.completedCount,
+            total: completion.scheduledCount,
+          }),
+        }),
+        ui.el("strong", {
+          style: { color: semaphoreCss(completion.percent) },
+          text: Math.round(completion.percent) + "%",
+        }),
+      ])
+    );
+    return ui.el("div", { class: "cal-panel" }, children);
+  }
+
+  /**
+   * "Registro rápido": calendario del mes con el estado de cada día y panel de
+   * toggles del día elegido, dentro de Historial y debajo de la semana.
+   */
+  function renderRetroCalendar(hoy) {
+    var month = calendarMonthAnchor(hoy);
+    var oldestCreation = domain.earliestCreationDate(state.routines);
+
+    var head = ui.el("div", { class: "cal-head" }, [
+      ui.el("h2", { class: "cal-title" }, [ui.icon("calendar", { size: 20 }), t("cal.title")]),
+      ui.el("div", { class: "cal-nav" }, [
+        ui.el(
+          "button",
+          {
+            type: "button",
+            class: "btn btn-ghost btn-sm cal-nav-btn",
+            "aria-label": t("cal.prevMonth"),
+            onclick: function () {
+              changeCalendarMonth(hoy, -1);
+            },
+          },
+          [ui.icon("chevron-left", { size: 16 })]
+        ),
+        ui.el("span", { class: "cal-month", role: "status", text: formatMonthTitle(month) }),
+        ui.el(
+          "button",
+          {
+            type: "button",
+            class: "btn btn-ghost btn-sm cal-nav-btn",
+            "aria-label": t("cal.nextMonth"),
+            disabled: domain.compareDates(month, hoy.slice(0, 8) + "01") >= 0,
+            onclick: function () {
+              changeCalendarMonth(hoy, 1);
+            },
+          },
+          [ui.icon("chevron-right", { size: 16 })]
+        ),
+      ]),
+    ]);
+
+    var grid = ui.el("div", {
+      class: "cal-grid",
+      role: "group",
+      "aria-label": t("cal.grid.aria", { month: formatMonthTitle(month) }),
+    });
+    domain.WEEKDAYS.forEach(function (weekday) {
+      grid.appendChild(
+        ui.el("span", {
+          class: "cal-weekday",
+          "aria-hidden": "true",
+          text: i18n.weekdayInitial(weekday),
+        })
+      );
+    });
+    domain.monthGrid(month).forEach(function (week) {
+      week.forEach(function (date) {
+        grid.appendChild(calendarCell(date, hoy, oldestCreation));
+      });
+    });
+
+    var children = [head, grid, calendarLegend()];
+    if (calendarDate !== null) {
+      if (domain.isFuture(calendarDate, hoy)) {
+        calendarDate = null;
+      } else {
+        children.push(calendarDayPanel(calendarDate, hoy));
+      }
+    }
+
+    return revealWrap(
+      ui.el(
+        "section",
+        { class: "hist-section cal-section", "aria-label": t("cal.section.aria") },
+        children
+      ),
+      180
     );
   }
 
@@ -2731,7 +3461,7 @@ window.MiRutina = window.MiRutina || {};
           if (input.value === "") {
             input.setAttribute("aria-invalid", "true");
             errorNode.hidden = false;
-            errorNode.textContent = "Elige una fecha para saltar a su semana.";
+            errorNode.textContent = t("hist.jump.error");
             return;
           }
           input.removeAttribute("aria-invalid");
@@ -2744,14 +3474,14 @@ window.MiRutina = window.MiRutina || {};
         ui.el("label", {
           class: "hist-jump-label",
           htmlFor: "jump-date",
-          text: "Saltar a la semana de…",
+          text: t("hist.jump.label"),
         }),
         ui.el("div", { class: "hist-jump-row" }, [
           input,
           ui.el("button", {
             type: "submit",
             class: "btn btn-secondary",
-            text: "Ir a la semana",
+            text: t("hist.jump.submit"),
           }),
         ]),
         errorNode,
@@ -2759,7 +3489,7 @@ window.MiRutina = window.MiRutina || {};
     );
 
     return revealWrap(
-      ui.el("section", { class: "hist-jump-section", "aria-label": "Saltar a una semana" }, [form]),
+      ui.el("section", { class: "hist-jump-section", "aria-label": t("hist.jump.aria") }, [form]),
       180
     );
   }
@@ -2770,26 +3500,17 @@ window.MiRutina = window.MiRutina || {};
   }
 
   function formatLongishDate(dateString) {
-    var parts = dateString.split("-").map(Number);
-    var parsed = new Date(parts[0], parts[1] - 1, parts[2]);
-    return parsed.toLocaleDateString("es-ES", {
-      day: "numeric",
-      month: "short",
-      year: "numeric",
-    });
+    return i18n.longishDate(dateString);
   }
 
   /** Fecha dd/mm/aaaa (resumen y rango de estadísticas). */
   function formatShortNumericDate(dateString) {
-    var parts = dateString.split("-").map(Number);
-    var day = String(parts[2]).padStart(2, "0");
-    var month = String(parts[1]).padStart(2, "0");
-    return day + "/" + month + "/" + parts[0];
+    return i18n.numericDate(dateString);
   }
 
   /** Fecha dd/mm (cabecera de las tarjetas del historial). */
   function formatDayShort(dateString) {
-    return formatShortNumericDate(dateString).slice(0, 5);
+    return i18n.dayShort(dateString);
   }
 
   // ---- Estadísticas --------------------
@@ -2798,12 +3519,15 @@ window.MiRutina = window.MiRutina || {};
   // tabla de detalle, rejilla de rachas, re-render
   // al cambiar el filtro sin recargar y estados vacíos.
 
-  var STATS_PERIOD_TABS = [
-    { id: "week", label: "Semana" },
-    { id: "month", label: "Mes" },
-    { id: "year", label: "Año" },
-    { id: "custom", label: "Personalizado" },
-  ];
+  /** Opciones del filtro de periodo (etiquetas traducidas al renderizar). */
+  function statsPeriodTabs() {
+    return [
+      { id: "week", label: t("stats.tab.week") },
+      { id: "month", label: t("stats.tab.month") },
+      { id: "year", label: t("stats.tab.year") },
+      { id: "custom", label: t("stats.tab.custom") },
+    ];
+  }
 
   /** Filtro activo; se limpia al cambiar de ruta. */
   var statsPeriod = "week";
@@ -2825,7 +3549,10 @@ window.MiRutina = window.MiRutina || {};
     var weekLine = domain.last7DaysLine(state.entries, state.routines, hoy);
     var streaks = state.routines
       .map(function (routine) {
-        return { routine: routine, streak: domain.routineStreak(state.entries, routine, hoy) };
+        return {
+          routine: routine,
+          streak: domain.routineStreak(state.entries, routine, hoy, state.shields),
+        };
       })
       .sort(function (a, b) {
         return b.streak - a.streak || a.routine.name.localeCompare(b.routine.name, "es");
@@ -2834,10 +3561,10 @@ window.MiRutina = window.MiRutina || {};
 
     // barras por rutina (colores) | dona "Global" (verde/rojo + leyenda).
     var chartsGrid = ui.el("div", { class: "stats-grid-2" }, [
-      ui.el("section", { class: "stats-chart-card card", "aria-label": "Cumplimiento por rutina" }, [
+      ui.el("section", { class: "stats-chart-card card", "aria-label": t("stats.byRoutine") }, [
         ui.el("h2", { class: "stats-block-title" }, [
           ui.icon("chart", { size: 20 }),
-          "Cumplimiento por rutina",
+          t("stats.byRoutine"),
         ]),
         routineStats.length > 0
           ? charts.barChart(
@@ -2852,22 +3579,21 @@ window.MiRutina = window.MiRutina || {};
             )
           : ui.emptyState({
               icon: "📊",
-              title: "Sin datos en el periodo",
-              description: "No hay rutinas programadas dentro del rango seleccionado.",
+              title: t("stats.empty.period.title"),
+              description: t("stats.empty.period.description"),
             }),
       ]),
-      ui.el("section", { class: "stats-chart-card card", "aria-label": "Global" }, [
+      ui.el("section", { class: "stats-chart-card card", "aria-label": t("stats.global") }, [
         ui.el("h2", { class: "stats-block-title" }, [
           ui.icon("target", { size: 20 }),
-          "Global",
+          t("stats.global"),
         ]),
         hasData
           ? charts.donutChart(donut)
           : ui.emptyState({
               icon: "🍩",
-              title: "Sin registros en el periodo",
-              description:
-                "Cuando haya rutinas programadas verás aquí la dona de cumplimiento.",
+              title: t("stats.empty.donut.title"),
+              description: t("stats.empty.donut.description"),
             }),
       ]),
     ]);
@@ -2885,14 +3611,15 @@ window.MiRutina = window.MiRutina || {};
         },
         [
           renderStatsCards(summary, range, hasData),
+          renderStatsComparison(hoy),
           chartsGrid,
-          renderStatsBlock("note", "Detalle por rutina", 180,
+          renderStatsBlock("note", t("stats.detail"), 180,
             routineStats.length > 0
               ? statsRoutineTable(routineStats)
               : ui.emptyState({
                   icon: "📋",
-                  title: "Sin detalle por rutina",
-                  description: "El periodo seleccionado no tiene rutinas programadas.",
+                  title: t("stats.empty.detail.title"),
+                  description: t("stats.empty.detail.description"),
                 })
           ),
         ]
@@ -2904,15 +3631,15 @@ window.MiRutina = window.MiRutina || {};
           ui.el("div", { class: "stats-block-head" }, [
             ui.el("h2", { id: "stats-line-title", class: "stats-block-title" }, [
               ui.icon("chart", { size: 20 }),
-              "Últimos 7 días",
+              t("stats.last7"),
             ]),
           ]),
           state.routines.length > 0
             ? charts.lineChart(weekLine)
             : ui.emptyState({
                 icon: "📈",
-                title: "Sin rutinas para mostrar",
-                description: "Crea rutinas para ver el cumplimiento diario de la semana.",
+                title: t("stats.empty.line.title"),
+                description: t("stats.empty.line.description"),
               }),
         ]),
         0
@@ -2923,14 +3650,14 @@ window.MiRutina = window.MiRutina || {};
         ui.el("section", { class: "stats-section", "aria-labelledby": "stats-streaks-title" }, [
           ui.el("h2", { id: "stats-streaks-title", class: "stats-block-title" }, [
             ui.icon("flame", { size: 20 }),
-            "Rachas actuales por rutina",
+            t("stats.streaks"),
           ]),
           streaks.length > 0
             ? statsStreakGrid(streaks)
             : ui.emptyState({
                 icon: "🔥",
-                title: "Sin rutinas para mostrar",
-                description: "Crea rutinas para ver aquí su racha actual.",
+                title: t("stats.empty.line.title"),
+                description: t("stats.empty.streaks.description"),
               }),
         ]),
         60
@@ -2957,19 +3684,19 @@ window.MiRutina = window.MiRutina || {};
   /** Pills de periodo + línea de rango visible ("📅 Este mes: … a …"). */
   function renderStatsFilter(hoy, fallbackRange, range) {
     var periodLabels = {
-      week: "Esta semana",
-      month: "Este mes",
-      year: "Este año",
-      custom: "Personalizado",
+      week: t("stats.period.week"),
+      month: t("stats.period.month"),
+      year: t("stats.period.year"),
+      custom: t("stats.period.custom"),
     };
     return revealWrap(
       ui.el("div", { class: "stats-filter" }, [
         ui.el("header", { class: "stats-header" }, [
-          ui.el("h1", { class: "stats-title" }, [ui.icon("chart", { size: 28 }), "Estadísticas"]),
+          ui.el("h1", { class: "stats-title" }, [ui.icon("chart", { size: 28 }), t("stats.title")]),
           ui.tabs({
-            items: STATS_PERIOD_TABS,
+            items: statsPeriodTabs(),
             value: statsPeriod,
-            ariaLabel: "Filtro de periodo",
+            ariaLabel: t("stats.filter.aria"),
             onChange: function (id) {
               checkMidnight();
               statsPeriod = id;
@@ -2984,12 +3711,10 @@ window.MiRutina = window.MiRutina || {};
         ui.el("p", { class: "stats-range-line" }, [
           ui.icon("calendar", { size: 17 }),
           " ",
-          periodLabels[statsPeriod] + ": ",
-          ui.el("strong", {
-            text:
-              formatShortNumericDate(range.start) +
-              " a " +
-              formatShortNumericDate(range.end),
+          t("stats.range", {
+            period: periodLabels[statsPeriod],
+            start: formatShortNumericDate(range.start),
+            end: formatShortNumericDate(range.end),
           }),
         ]),
         statsPeriod === "custom" ? buildCustomRangeForm(hoy, fallbackRange) : null,
@@ -3035,8 +3760,8 @@ window.MiRutina = window.MiRutina || {};
     });
 
     return ui.el("div", { class: "stats-range-row" }, [
-      ui.field({ label: "Inicio", control: startInput, error: draft.errors.inicio }),
-      ui.field({ label: "Fin", control: endInput, error: draft.errors.fin }),
+      ui.field({ label: t("stats.custom.start"), control: startInput, error: draft.errors.inicio }),
+      ui.field({ label: t("stats.custom.end"), control: endInput, error: draft.errors.fin }),
     ]);
   }
 
@@ -3045,8 +3770,8 @@ window.MiRutina = window.MiRutina || {};
     if (draft.start === "" || draft.end === "") {
       draft.errors =
         draft.start === ""
-          ? { inicio: "Selecciona la fecha de inicio." }
-          : { fin: "Selecciona la fecha de fin." };
+          ? { inicio: t("stats.custom.startError") }
+          : { fin: t("stats.custom.endError") };
       rerender();
       return;
     }
@@ -3063,30 +3788,227 @@ window.MiRutina = window.MiRutina || {};
     rerender();
   }
 
-  /** 3 tarjetas del periodo con números coloreados por semántica. */
+  /** 3 tarjetas del periodo con números coloreados por semántica + total histórico de tiempo. */
   function renderStatsCards(summary, range, hasData) {
+    var lifetimeMinutes = domain.totalLifetimeMinutes(state.entries, state.routines);
     return revealWrap(
-      ui.el("section", { class: "stats-cards", "aria-label": "Resumen del periodo" }, [
+      ui.el("section", { class: "stats-cards", "aria-label": t("stats.cards.aria") }, [
         summaryCard(
-          "Cumplimiento general",
-          hasData ? Math.round(summary.percent) + "%" : "—",
-          hasData ? formatRange(range.start, range.end) : "Sin datos en este periodo",
+          t("stats.card.percent"),
+          hasData ? i18n.percent(summary.percent) : "—",
+          hasData ? formatRange(range.start, range.end) : t("stats.card.percentHint"),
           "accent"
         ),
         summaryCard(
-          "Registros cumplidos",
+          t("stats.card.completed"),
           hasData ? String(summary.completedCount) : "—",
-          "Rutinas marcadas en el periodo",
+          t("stats.card.completedHint"),
           "success"
         ),
         summaryCard(
-          "Registros totales",
+          t("stats.card.total"),
           hasData ? String(summary.scheduledCount) : "—",
-          "Programados: cumplidos + no cumplidos"
+          t("stats.card.totalHint")
+        ),
+        // Suma de todos los días cumplidos × duración de su rutina.
+        summaryCard(
+          t("stats.card.lifetime"),
+          domain.formatLifetimeDuration(lifetimeMinutes),
+          t("stats.card.lifetimeHint")
         ),
       ]),
       0
     );
+  }
+
+  /** Número con signo por idioma: "+12", "−3,5" (es) / "−3.5" (en), "0". */
+  function formatSignedNumber(value) {
+    return i18n.signedNumber(value);
+  }
+
+  /** Delta de minutos con signo y formato largo: "+1 h 30 min", "−45 min". */
+  function formatSignedDuration(minutes) {
+    if (minutes === 0) return t("duration.minutes", { minutes: 0 });
+    return (minutes > 0 ? "+" : "−") + domain.formatLifetimeDuration(Math.abs(minutes));
+  }
+
+  /** Delta con la variación relativa entre paréntesis cuando hay base previa. */
+  function signedWithRelative(delta, isDuration) {
+    var absolute = isDuration
+      ? formatSignedDuration(delta.absolute)
+      : formatSignedNumber(delta.absolute);
+    return delta.relative === null
+      ? absolute
+      : absolute + " (" + t("common.percent", { value: formatSignedNumber(delta.relative) }) + ")";
+  }
+
+  /** Métricas comparadas de una tarjeta, con valor, valor previo y delta formateados. */
+  function comparisonMetrics(comparison) {
+    var deltas = comparison.deltas;
+    var current = comparison.current;
+    var previous = comparison.previous;
+    return [
+      {
+        label: t("cmp.metric.percent"),
+        current: current.hasData ? i18n.percent(current.percent) : "—",
+        previous: previous.hasData ? i18n.percent(previous.percent) : "—",
+        delta: deltas.percent.absolute,
+        deltaText: t("cmp.delta.points", { value: formatSignedNumber(deltas.percent.absolute) }),
+      },
+      {
+        label: t("cmp.metric.completed"),
+        current: current.hasData ? String(current.completedCount) : "—",
+        previous: previous.hasData ? String(previous.completedCount) : "—",
+        delta: deltas.completedCount.absolute,
+        deltaText: signedWithRelative(deltas.completedCount),
+      },
+      {
+        label: t("cmp.metric.minutes"),
+        current: current.hasData ? domain.formatLifetimeDuration(current.minutes) : "—",
+        previous: previous.hasData ? domain.formatLifetimeDuration(previous.minutes) : "—",
+        delta: deltas.minutes.absolute,
+        deltaText: signedWithRelative(deltas.minutes, true),
+      },
+      {
+        label: t("cmp.metric.fullDays"),
+        current: current.hasData ? String(current.fullDays) : "—",
+        previous: previous.hasData ? String(previous.fullDays) : "—",
+        delta: deltas.fullDays.absolute,
+        deltaText: signedWithRelative(deltas.fullDays),
+      },
+    ];
+  }
+
+  /**
+   * Delta con signo explícito y color por semántica (mejora verde, empeora
+   * rojo, sin cambio neutro); sin base previa queda en «—».
+   */
+  function comparisonDelta(metric, hasPreviousData) {
+    if (!hasPreviousData || metric.delta === null) {
+      return ui.el("span", { class: "cmp-delta cmp-delta-none", text: "—" });
+    }
+    if (metric.delta === 0) {
+      return ui.el("span", { class: "cmp-delta cmp-delta-flat", text: t("cmp.delta.flat") });
+    }
+    var up = metric.delta > 0;
+    return ui.el("span", { class: "cmp-delta cmp-delta-" + (up ? "up" : "down") }, [
+      ui.icon(up ? "trend-up" : "trend-down", { size: 14 }),
+      metric.deltaText,
+    ]);
+  }
+
+  /** Fila de métrica: etiqueta, valor actual, delta y valor del periodo anterior. */
+  function comparisonRow(metric, hasPreviousData) {
+    return ui.el("li", { class: "cmp-row" }, [
+      ui.el("span", { class: "cmp-label", text: metric.label }),
+      ui.el("span", { class: "cmp-values" }, [
+        ui.el("span", { class: "cmp-current", text: metric.current }),
+        comparisonDelta(metric, hasPreviousData),
+      ]),
+      ui.el("span", { class: "cmp-previous", text: t("cmp.previous", { value: metric.previous }) }),
+    ]);
+  }
+
+  /** Tramo transcurrido de un periodo (recortado a hoy) para el pill del rango. */
+  function elapsedRange(range, hoy) {
+    return {
+      start: range.start,
+      end: domain.compareDates(range.end, hoy) > 0 ? hoy : range.end,
+    };
+  }
+
+  /** Tarjeta comparativa: rangos comparados, nota de contexto y filas de métricas. */
+  function comparisonCard(title, currentRange, previousRange, comparison, hoy) {
+    var shown = elapsedRange(currentRange, hoy);
+    var card = ui.el("article", { class: "card cmp-card", "aria-label": title });
+    card.appendChild(
+      ui.el("header", { class: "cmp-head" }, [
+        ui.el("h3", { class: "cmp-title", text: title }),
+        ui.el("p", { class: "cmp-subtitle" }, [
+          ui.el("span", { class: "pill cmp-pill", text: formatRange(shown.start, shown.end) }),
+          previousRange === null
+            ? t("cmp.noPreviousRange")
+            : t("cmp.vs", { range: formatRange(previousRange.start, previousRange.end) }),
+        ]),
+      ])
+    );
+
+    if (comparison === null || !comparison.hasAnyData) {
+      card.appendChild(
+        ui.el("p", {
+          class: "cmp-empty",
+          text: t("cmp.empty"),
+        })
+      );
+      return card;
+    }
+
+    if (!comparison.hasPreviousData) {
+      card.appendChild(
+        ui.el("p", {
+          class: "cmp-note",
+          text: t("cmp.noPreviousData"),
+        })
+      );
+    } else if (comparison.current.scheduledCount === 0) {
+      card.appendChild(
+        ui.el("p", { class: "cmp-note", text: t("cmp.currentEmpty") })
+      );
+    }
+
+    var list = ui.el("ul", { class: "cmp-list" });
+    comparisonMetrics(comparison).forEach(function (metric) {
+      list.appendChild(comparisonRow(metric, comparison.hasPreviousData));
+    });
+    card.appendChild(list);
+    return card;
+  }
+
+  /**
+   * Comparativas fijas (semana vs. semana anterior y mes vs. mes anterior),
+   * ajenas al filtro de periodo, igual que "Últimos 7 días" y "Tiempo de por
+   * vida". El periodo anterior se recorta al mismo avance ("día 18 con día
+   * 18") para no medir un mes en curso contra un mes completo.
+   */
+  function renderStatsComparison(hoy) {
+    var items = [
+      {
+        title: t("cmp.week"),
+        current: domain.weekRange(hoy),
+        previous: domain.previousWeekRange(hoy),
+      },
+      {
+        title: t("cmp.month"),
+        current: domain.monthRange(hoy),
+        previous: domain.previousMonthRange(hoy),
+      },
+    ];
+
+    var grid = ui.el("div", { class: "cmp-grid" });
+    items.forEach(function (item) {
+      var previousRange = domain.comparableRange(item.current, item.previous, hoy);
+      grid.appendChild(
+        comparisonCard(
+          item.title,
+          item.current,
+          previousRange,
+          previousRange === null
+            ? null
+            : domain.comparePeriods(state.entries, state.routines, item.current, previousRange, hoy),
+          hoy
+        )
+      );
+    });
+
+    var wrap = ui.el("div", { class: "cmp-wrap" }, [
+      ui.el("p", {
+        class: "cmp-hint",
+        text: t("cmp.hint"),
+      }),
+      grid,
+    ]);
+
+    return renderStatsBlock("trend-up", t("cmp.title"), 60, wrap);
   }
 
   /** Sección genérica de estadísticas: título con icono + contenido. */
@@ -3120,12 +4042,19 @@ window.MiRutina = window.MiRutina || {};
           }),
           ui.el("td", {
             class: "stats-table-percent-col",
-            text: Math.round(row.percent) + "%",
+            text: i18n.percent(row.percent),
+          }),
+          // Total histórico de la rutina (días cumplidos × duración).
+          ui.el("td", {
+            class: "stats-table-lifetime",
+            text: domain.formatLifetimeDuration(
+              domain.routineLifetimeMinutes(state.entries, row.routine)
+            ),
           }),
           ui.el("td", { class: "stats-table-progress" }, [
             ui.progressBar({
               value: row.percent,
-              label: "Cumplimiento de " + row.routine.name + " en el periodo",
+              label: t("stats.table.progressAria", { name: row.routine.name }),
               color: row.routine.color,
             }),
           ]),
@@ -3137,10 +4066,11 @@ window.MiRutina = window.MiRutina || {};
       ui.el("table", { class: "stats-table" }, [
         ui.el("thead", {}, [
           ui.el("tr", {}, [
-            ui.el("th", { scope: "col", text: "Rutina" }),
-            ui.el("th", { scope: "col", text: "Cumplidas / programadas" }),
-            ui.el("th", { scope: "col", text: "%" }),
-            ui.el("th", { scope: "col", text: "Progreso" }),
+            ui.el("th", { scope: "col", text: t("stats.table.routine") }),
+            ui.el("th", { scope: "col", text: t("stats.table.counts") }),
+            ui.el("th", { scope: "col", text: t("stats.table.percent") }),
+            ui.el("th", { scope: "col", text: t("stats.table.lifetime") }),
+            ui.el("th", { scope: "col", text: t("stats.table.progress") }),
           ]),
         ]),
         tbody,
@@ -3164,7 +4094,7 @@ window.MiRutina = window.MiRutina || {};
           ]),
           ui.el("span", {
             class: "streak-cell-count",
-            text: "🔥 " + item.streak + " " + (item.streak === 1 ? "día" : "días"),
+            text: plural("stats.streakDays", item.streak),
           }),
         ])
       );
@@ -3193,7 +4123,7 @@ window.MiRutina = window.MiRutina || {};
     var page = ui.el("div", { class: "log-page" });
     page.appendChild(renderLogHeader(date, hoy));
     page.appendChild(renderLogSummary(completion, date, hoy));
-    page.appendChild(renderLogChecklist(date, schedule, completion));
+    page.appendChild(renderLogChecklist(date, schedule));
     container.appendChild(page);
   }
 
@@ -3203,25 +4133,25 @@ window.MiRutina = window.MiRutina || {};
         ui.el("div", {}, [
           ui.el("h1", { class: "log-title" }, [
             ui.icon("check-circle", { size: 28 }),
-            "Registro diario",
+            t("log.title"),
           ]),
           ui.el("div", { class: "page-sub-row" }, [
             ui.el("p", { class: "log-date-line", text: formatLongDate(date) }),
             // pill "Hoy" junto a la fecha larga.
-            date === hoy ? ui.el("span", { class: "pill pill-today", text: "Hoy" }) : null,
+            date === hoy ? ui.el("span", { class: "pill pill-today", text: t("common.today") }) : null,
           ]),
         ]),
         ui.el("div", { class: "log-date-nav" }, [
           ui.el("button", {
             type: "button",
             class: "btn btn-secondary btn-sm",
-            "aria-label": "Día anterior",
+            "aria-label": t("log.prevDay"),
             onclick: function () {
               changeLogDate(domain.addDays(date, -1));
             },
-          }, [ui.icon("chevron-left", { size: 15 }), "Anterior"]),
+          }, [ui.icon("chevron-left", { size: 15 }), t("common.previous")]),
           ui.el("div", { class: "log-date-field" }, [
-            ui.el("label", { class: "log-date-label", htmlFor: "log-date", text: "Fecha" }),
+            ui.el("label", { class: "log-date-label", htmlFor: "log-date", text: t("log.date") }),
             ui.el("input", {
               id: "log-date",
               name: "log-date",
@@ -3239,17 +4169,17 @@ window.MiRutina = window.MiRutina || {};
           ui.el("button", {
             type: "button",
             class: "btn btn-secondary btn-sm",
-            "aria-label": "Día siguiente",
+            "aria-label": t("log.nextDay"),
             disabled: domain.compareDates(date, hoy) >= 0,
             onclick: function () {
               changeLogDate(domain.addDays(date, 1));
             },
-          }, ["Siguiente", ui.icon("chevron-right", { size: 15 })]),
+          }, [t("common.next"), ui.icon("chevron-right", { size: 15 })]),
           date !== hoy
             ? ui.el("button", {
                 type: "button",
                 class: "btn btn-ghost btn-sm",
-                text: "Hoy",
+                text: t("common.today"),
                 onclick: function () {
                   changeLogDate(hoy);
                 },
@@ -3268,7 +4198,7 @@ window.MiRutina = window.MiRutina || {};
   function changeLogDate(next) {
     checkMidnight();
     if (domain.isFuture(next, today())) {
-      logDateError = "No puedes registrar una fecha futura; solo hoy y días anteriores.";
+      logDateError = t("log.futureError");
       rerender();
       return;
     }
@@ -3304,18 +4234,22 @@ window.MiRutina = window.MiRutina || {};
 
     var card = ui.el("div", { class: "card log-summary-card" }, [
       ui.el("div", { class: "log-metrics" }, [
-        logMetric("Progreso", Math.round(todayPercent) + "%", progressTone),
+        logMetric(t("log.metric.progress"), i18n.percent(todayPercent), progressTone),
         logMetric(
-          "Cumplidas",
+          t("log.metric.completed"),
           completion.completedCount + "/" + completion.scheduledCount,
           "accent"
         ),
-        logMetric("Tiempo destinado", domain.formatDuration(completion.scheduledMinutes)),
-        logMetric("Tiempo cumplido", domain.formatDuration(completion.completedMinutes), "success"),
+        logMetric(t("log.metric.scheduledTime"), domain.formatDuration(completion.scheduledMinutes)),
+        logMetric(
+          t("log.metric.completedTime"),
+          domain.formatDuration(completion.completedMinutes),
+          "success"
+        ),
       ]),
       ui.progressBar({
         value: todayPercent,
-        label: "Cumplimiento del día",
+        label: t("log.progressAria"),
         size: "lg",
         color: semaphoreCss(todayPercent),
       }),
@@ -3323,19 +4257,18 @@ window.MiRutina = window.MiRutina || {};
         ui.el("div", { class: "log-summary-head" }, [
           ui.el("span", { class: "occupancy-label" }, [
             ui.icon("chart", { size: 16 }),
-            "Ocupación del día: ",
-            ui.el("strong", { text: occupiedText + " de 24h" }),
+            t("log.occupancy", { value: occupiedText + " " + t("common.hours24") }),
           ]),
           // Badge de tiempo libre.
           ui.el("span", { class: "free-badge" }, [
             ui.icon("clock", { size: 14 }),
-            "Tiempo libre: " + domain.formatDuration(freeMinutes),
+            t("log.freeTime", { value: domain.formatDuration(freeMinutes) }),
           ]),
         ]),
         ui.el("div", {
           class: "occupancy-bar",
           role: "progressbar",
-          "aria-label": "Porcentaje de las 24 horas ocupado por rutinas",
+          "aria-label": t("log.occupancy.aria"),
           "aria-valuemin": "0",
           "aria-valuemax": "100",
           "aria-valuenow": String(Math.round(occupancyValue)),
@@ -3348,42 +4281,58 @@ window.MiRutina = window.MiRutina || {};
         ]),
         ui.el("div", { class: "occupancy-scale" }, [
           ui.el("span", { text: "0h" }),
-          ui.el("span", { text: domain.formatDuration(freeMinutes) + " libres" }),
+          ui.el("span", { text: t("common.free", { value: domain.formatDuration(freeMinutes) }) }),
           ui.el("span", { text: "24h" }),
         ]),
       ]),
     ]);
 
     return revealWrap(
-      ui.el("section", { class: "log-section", "aria-label": "Resumen del día" }, [card]),
+      ui.el("section", { class: "log-section", "aria-label": t("log.summary.aria") }, [card]),
       60
     );
   }
 
-  function renderLogChecklist(date, schedule, completion) {
+  function renderLogChecklist(date, schedule) {
+    var focusOn = domain.focusOn(state.focus, date);
+    var focusIds = focusOn ? domain.focusIds(state.focus, date) : [];
+    // En modo foco la lista y las acciones masivas se limitan a las prioridades.
+    var visible = focusOn
+      ? schedule.filter(function (routine) {
+          return focusIds.indexOf(routine.id) !== -1;
+        })
+      : schedule;
+    var dayEntries = domain.entriesForDate(state.entries, date);
+    var markedVisible = visible.filter(function (routine) {
+      return domain.isMarked(dayEntries, routine.id);
+    }).length;
+    var visibleIds = visible.map(function (routine) {
+      return routine.id;
+    });
+
     var head = ui.el("div", { class: "log-checklist-head" }, [
       ui.el("h2", { class: "section-title" }, [
         ui.icon("list", { size: 20 }),
-        "Rutinas del día",
+        t("log.checklist.title"),
       ]),
       schedule.length > 0
         ? ui.el("div", { class: "log-bulk-actions" }, [
             ui.el("button", {
               type: "button",
               class: "btn btn-secondary btn-sm",
-              text: "Marcar todas",
-              disabled: completion.completedCount === schedule.length,
+              text: t("log.bulk.markAll"),
+              disabled: visible.length === 0 || markedVisible === visible.length,
               onclick: function () {
-                setAll(date, true);
+                setAll(date, true, visibleIds);
               },
             }),
             ui.el("button", {
               type: "button",
               class: "btn btn-ghost btn-sm",
-              text: "Desmarcar todas",
-              disabled: completion.completedCount === 0,
+              text: t("log.bulk.unmarkAll"),
+              disabled: markedVisible === 0,
               onclick: function () {
-                setAll(date, false);
+                setAll(date, false, visibleIds);
               },
             }),
           ])
@@ -3393,26 +4342,149 @@ window.MiRutina = window.MiRutina || {};
     var body;
     if (schedule.length === 0) {
       body = ui.emptyState({
-        title: "No hay rutinas programadas para este día",
-        description:
-          "Programa rutinas desde la pantalla de Rutinas y vuelve aquí para registrarlas.",
+        title: t("log.empty.title"),
+        description: t("log.empty.description"),
+      });
+    } else if (visible.length === 0) {
+      body = ui.emptyState({
+        icon: "🎯",
+        title: t("log.focusEmpty.title"),
+        description: t("log.focusEmpty.description", { max: domain.MAX_FOCUS_PRIORITIES }),
       });
     } else {
-      var dayEntries = domain.entriesForDate(state.entries, date);
       var list = ui.el("div", { class: "log-checklist" });
-      schedule.forEach(function (routine) {
+      visible.forEach(function (routine) {
         list.appendChild(logRoutineCard(routine, dayEntries, date));
       });
       body = list;
     }
 
+    var children = [head];
+    if (schedule.length > 0) {
+      children.push(buildFocusPanel(date, schedule, focusOn, focusIds));
+    }
+    children.push(body);
+
     return revealWrap(
-      ui.el("section", { class: "log-section", "aria-label": "Rutinas del día" }, [
-        head,
-        body,
-      ]),
+      ui.el("section", { class: "log-section", "aria-label": t("log.checklist.aria") }, children),
       120
     );
+  }
+
+  /**
+   * Panel del modo foco: interruptor del día, contador de prioridades
+   * (máx. 3) y chips de las rutinas programadas para elegirlas.
+   */
+  function buildFocusPanel(date, schedule, focusOn, focusIds) {
+    var counter = ui.el("span", {
+      id: "focus-counter",
+      class: "log-focus-counter",
+      role: "status",
+      text: t("focus.counter", { count: focusIds.length, max: domain.MAX_FOCUS_PRIORITIES }),
+    });
+    var children = [
+      ui.el("div", { class: "log-focus-top" }, [
+        ui.checkbox({
+          id: "focus-toggle",
+          label: t("focus.title"),
+          checked: focusOn,
+          onChange: function () {
+            toggleFocusMode(date);
+          },
+        }),
+        counter,
+      ]),
+      ui.el("p", {
+        class: "log-focus-hint",
+        text: t("focus.hint", { max: domain.MAX_FOCUS_PRIORITIES }),
+      }),
+    ];
+    if (focusOn) {
+      var chips = ui.el("div", {
+        class: "log-focus-chips",
+        role: "group",
+        "aria-label": t("focus.chips.aria"),
+      });
+      schedule.forEach(function (routine) {
+        var selected = focusIds.indexOf(routine.id) !== -1;
+        var full = focusIds.length >= domain.MAX_FOCUS_PRIORITIES;
+        chips.appendChild(
+          ui.el(
+            "button",
+            {
+              type: "button",
+              class: selected ? "focus-chip focus-chip-on" : "focus-chip",
+              "aria-pressed": String(selected),
+              disabled: !selected && full,
+              "aria-label": t(selected ? "focus.remove" : "focus.add", { name: routine.name }),
+              onclick: function () {
+                toggleFocusPick(date, routine.id);
+              },
+            },
+            [
+              ui.el("span", {
+                class: "focus-chip-dot",
+                style: { background: routine.color },
+                "aria-hidden": "true",
+              }),
+              routine.name,
+              selected ? ui.icon("check", { size: 14 }) : null,
+            ]
+          )
+        );
+      });
+      children.push(chips);
+    }
+    return ui.el("section", { class: "log-focus card", "aria-label": t("focus.title") }, children);
+  }
+
+  /** Persiste el foco del día (null lo borra); false si la escritura falla. */
+  function persistFocus(next) {
+    var saved = storage.saveFocus(next);
+    if (!saved.ok) {
+      notifyWriteError(saved);
+      return false;
+    }
+    state.focus = next;
+    return true;
+  }
+
+  /** Enciende o apaga el modo foco de la fecha visible. */
+  function toggleFocusMode(date) {
+    checkMidnight();
+    var on = domain.focusOn(state.focus, date);
+    var next = on ? null : { date: date, routineIds: [] };
+    if (!persistFocus(next)) {
+      return;
+    }
+    rerender();
+    ui.toast({
+      message: on ? t("focus.off") : t("focus.on", { max: domain.MAX_FOCUS_PRIORITIES }),
+      variant: on ? "info" : "success",
+    });
+  }
+
+  /** Añade o quita una prioridad del día (máximo 3). */
+  function toggleFocusPick(date, routineId) {
+    checkMidnight();
+    var ids = domain.focusIds(state.focus, date);
+    var selected = ids.indexOf(routineId) !== -1;
+    if (!selected && ids.length >= domain.MAX_FOCUS_PRIORITIES) {
+      ui.toast({
+        message: t("focus.max", { max: domain.MAX_FOCUS_PRIORITIES }),
+        variant: "error",
+      });
+      return;
+    }
+    var nextIds = selected
+      ? ids.filter(function (id) {
+          return id !== routineId;
+        })
+      : ids.concat([routineId]);
+    if (!persistFocus({ date: date, routineIds: nextIds })) {
+      return;
+    }
+    rerender();
   }
 
   /**
@@ -3436,7 +4508,7 @@ window.MiRutina = window.MiRutina || {};
           notesToggle.setAttribute("aria-expanded", String(openNotes[routine.id]));
         },
       },
-      [ui.icon("note", { size: 15 }), "Notas"]
+      [ui.icon("note", { size: 15 }), t("log.notes")]
     );
 
     var collapse = ui.el(
@@ -3457,7 +4529,7 @@ window.MiRutina = window.MiRutina || {};
             id: "check-" + routine.id,
             checked: marked,
             checkedColor: "var(--color-success)",
-            ariaLabel: (marked ? "Desmarcar " : "Marcar ") + routine.name,
+            ariaLabel: t(marked ? "check.unmark" : "check.mark", { name: routine.name }),
             onChange: function () {
               toggleRoutine(routine.id, date);
             },
@@ -3515,7 +4587,7 @@ window.MiRutina = window.MiRutina || {};
       rows: 2,
       value: initial,
       disabled: !marked,
-      placeholder: marked ? "Añade una nota…" : "Marca la rutina para añadir una nota",
+      placeholder: marked ? t("note.placeholder") : t("note.placeholderDisabled"),
       "aria-describedby": hintId,
       "data-draft": textareaId,
       "data-note-routine": routine.id,
@@ -3532,7 +4604,7 @@ window.MiRutina = window.MiRutina || {};
       var result = saveNote(routine.id, date, text);
       applyNoteMeta(routine.id, text);
       if (result.ok) {
-        hint.textContent = "Guardada ✓";
+        hint.textContent = t("note.savedHint");
       } else {
         hint.textContent = result.message;
         ui.toast({ message: result.message, variant: "error" });
@@ -3540,18 +4612,14 @@ window.MiRutina = window.MiRutina || {};
     });
 
     return ui.el("div", { class: "note-editor" }, [
-      ui.el("label", { class: "note-label", htmlFor: textareaId, text: "Nota" }),
+      ui.el("label", { class: "note-label", htmlFor: textareaId, text: t("note.label") }),
       textarea,
       ui.el("div", { class: "note-meta" }, [hint, counter]),
     ]);
   }
 
   function noteOverLimitMessage() {
-    return (
-      "La nota no puede superar los " +
-      NOTE_MAX_LENGTH +
-      " caracteres; no se guardará hasta que la acortes."
-    );
+    return t("note.overLimit", { max: NOTE_MAX_LENGTH });
   }
 
   /** Pinta contador y color del límite para la nota de una rutina. */
@@ -3594,15 +4662,10 @@ window.MiRutina = window.MiRutina || {};
   var HEX_COLOR_PATTERN = /^#[0-9a-fA-F]{6}$/;
   /** La tarjeta se desvanece antes de quitarse del DOM. */
   var REMOVE_FADE_MS = 220;
-  var WEEKDAY_SHORT_LABELS = {
-    1: "Lun",
-    2: "Mar",
-    3: "Mié",
-    4: "Jue",
-    5: "Vie",
-    6: "Sáb",
-    7: "Dom",
-  };
+  /** Abreviatura del día por idioma: "Lun"/"Mié" (es), "Mon"/"Wed" (en). */
+  function weekdayShortLabel(weekday) {
+    return i18n.weekdayShort(weekday);
+  }
 
   /** Formulario abierto: null | { mode:"create" } | { mode:"edit", routineId }. */
   var editing = null;
@@ -3626,7 +4689,7 @@ window.MiRutina = window.MiRutina || {};
       page.appendChild(
         revealWrap(
           ui.el("section", {
-            "aria-label": editing.mode === "create" ? "Crear rutina" : "Editar rutina",
+            "aria-label": t(editing.mode === "create" ? "rt.aria.create" : "rt.aria.edit"),
           }, [ui.el("div", { class: "card" }, [buildRoutineForm()])]),
           0
         )
@@ -3639,7 +4702,7 @@ window.MiRutina = window.MiRutina || {};
   function renderRutinasHeader() {
     return revealWrap(
       ui.el("header", { class: "rt-header" }, [
-        ui.el("h1", { class: "rt-title" }, [ui.icon("list", { size: 28 }), "Mis Rutinas"]),
+        ui.el("h1", { class: "rt-title" }, [ui.icon("list", { size: 28 }), t("rt.title")]),
         editing === null
           ? ui.el(
               "button",
@@ -3648,7 +4711,7 @@ window.MiRutina = window.MiRutina || {};
                 class: "btn btn-primary",
                 onclick: openCreateForm,
               },
-              [ui.icon("plus", { size: 18 }), "Nueva rutina"]
+              [ui.icon("plus", { size: 18 }), t("rt.new")]
             )
           : null,
       ]),
@@ -3705,13 +4768,12 @@ window.MiRutina = window.MiRutina || {};
     if (state.routines.length === 0) {
       body = ui.emptyState({
         icon: "📆",
-        title: "Aún no hay rutinas",
-        description:
-          "Crea tu primera rutina para empezar a registrar cumplimiento y objetivos.",
+        title: t("rt.empty.title"),
+        description: t("rt.empty.description"),
         actions: ui.el("button", {
           type: "button",
           class: "btn btn-primary",
-          text: "Crear la primera rutina",
+          text: t("rt.empty.action"),
           onclick: openCreateForm,
         }),
       });
@@ -3723,7 +4785,7 @@ window.MiRutina = window.MiRutina || {};
       body = list;
     }
     return revealWrap(
-      ui.el("section", { class: "rt-section", "aria-label": "Lista de rutinas" }, [body]),
+      ui.el("section", { class: "rt-section", "aria-label": t("rt.list.aria") }, [body]),
       60
     );
   }
@@ -3734,15 +4796,17 @@ window.MiRutina = window.MiRutina || {};
    * días (activos en índigo con glow) y pie Editar/Eliminar.
    */
   function routineItem(routine) {
-    var days = ui.el("div", { class: "rt-days", role: "list", "aria-label": "Días de la semana" });
+    var days = ui.el("div", { class: "rt-days", role: "list", "aria-label": t("rt.days.aria") });
     domain.WEEKDAYS.forEach(function (weekday) {
       var on = routine.weekdays.indexOf(weekday) !== -1;
       days.appendChild(
         ui.el("span", {
           class: on ? "rt-day-pill rt-day-pill-on" : "rt-day-pill",
           role: "listitem",
-          "aria-label": domain.WEEKDAY_LABELS[weekday] + (on ? ": programado" : ": no programado"),
-          text: WEEKDAY_SHORT_LABELS[weekday],
+          "aria-label": t(on ? "rt.day.scheduled" : "rt.day.notScheduled", {
+            day: i18n.weekdayLong(weekday),
+          }),
+          text: weekdayShortLabel(weekday),
         })
       );
     });
@@ -3758,7 +4822,9 @@ window.MiRutina = window.MiRutina || {};
         ui.checkbox({
           id: "rt-active-" + routine.id,
           checked: routine.active,
-          ariaLabel: (routine.active ? "Desactivar " : "Activar ") + routine.name,
+          ariaLabel: t(routine.active ? "rt.active.ariaOn" : "rt.active.ariaOff", {
+            name: routine.name,
+          }),
           onChange: function (checked) {
             var result = setRoutineActive(routine.id, checked);
             ui.toast({ message: result.message, variant: result.ok ? "success" : "error" });
@@ -3774,7 +4840,19 @@ window.MiRutina = window.MiRutina || {};
       ui.el("p", { class: "rt-meta" }, [
         ui.icon("clock", { size: 15 }),
         domain.formatDuration(routine.durationMinutes),
-        routine.active ? null : ui.el("span", { class: "pill pill-muted", text: "Inactiva" }),
+        routine.active ? null : ui.el("span", { class: "pill pill-muted", text: t("rt.inactive") }),
+        // Tiempo acumulado de por vida: días cumplidos × duración.
+        ui.el("span", {
+          class: "badge rt-lifetime",
+          title: t("rt.lifetime.title"),
+        }, [
+          ui.icon("sparkle", { size: 14 }),
+          t("rt.lifetime", {
+            value: domain.formatLifetimeDuration(
+              domain.routineLifetimeMinutes(state.entries, routine)
+            ),
+          }),
+        ]),
       ]),
       days,
       ui.el("div", { class: "rt-actions" }, [
@@ -3787,7 +4865,7 @@ window.MiRutina = window.MiRutina || {};
               openEditForm(routine);
             },
           },
-          [ui.icon("edit", { size: 15 }), "Editar"]
+          [ui.icon("edit", { size: 15 }), t("common.edit")]
         ),
         ui.el(
           "button",
@@ -3798,7 +4876,7 @@ window.MiRutina = window.MiRutina || {};
               askDeleteRoutine(routine);
             },
           },
-          [ui.icon("trash", { size: 15 }), "Eliminar"]
+          [ui.icon("trash", { size: 15 }), t("common.delete")]
         ),
       ]),
     ]);
@@ -3818,21 +4896,15 @@ window.MiRutina = window.MiRutina || {};
    */
   function askDeleteRoutine(routine) {
     var body = ui.el("div", {}, [
-      ui.el("p", {}, [
-        "Vas a eliminar ",
-        ui.el("strong", { text: routine.name }),
-        ".",
-      ]),
+      ui.el("p", { text: t("rt.delete.intro", { name: routine.name }) }),
       ui.el("p", {
-        text:
-          "Se eliminarán también sus registros de cumplimiento y sus vínculos " +
-          "con objetivos; las estadísticas se recalcularán.",
+        text: t("rt.delete.body"),
       }),
     ]);
     ui.confirmDialog({
-      title: "Eliminar rutina",
+      title: t("rt.delete.title"),
       body: body,
-      confirmLabel: "Eliminar",
+      confirmLabel: t("common.delete"),
       tone: "danger",
     }).then(function (confirmed) {
       if (!confirmed) return;
@@ -3873,7 +4945,7 @@ window.MiRutina = window.MiRutina || {};
       type: "text",
       class: "rf-input",
       value: s.name,
-      placeholder: "Ej: Correr, Leer, Meditar…",
+      placeholder: t("rt.form.placeholderName"),
     });
     var descriptionInput = ui.el("input", {
       id: "routine-description",
@@ -3881,7 +4953,7 @@ window.MiRutina = window.MiRutina || {};
       type: "text",
       class: "rf-input",
       value: s.description,
-      placeholder: "Detalles, motivación, etc.",
+      placeholder: t("rt.form.placeholderDescription"),
     });
     var hoursInput = ui.el("input", {
       id: "routine-hours",
@@ -3892,7 +4964,7 @@ window.MiRutina = window.MiRutina || {};
       max: 24,
       inputmode: "numeric",
       value: s.hours,
-      "aria-label": "Horas",
+      "aria-label": t("rt.form.ariaHours"),
     });
     var minutesInput = ui.el("input", {
       id: "routine-minutes",
@@ -3903,7 +4975,7 @@ window.MiRutina = window.MiRutina || {};
       max: 59,
       inputmode: "numeric",
       value: s.minutes,
-      "aria-label": "Minutos",
+      "aria-label": t("rt.form.ariaMinutes"),
     });
     var durationRow = ui.el("div", { class: "rf-duration-row" }, [
       ui.el("span", { class: "rf-duration-part" }, [
@@ -3919,8 +4991,8 @@ window.MiRutina = window.MiRutina || {};
       type: "color",
       class: "color-swatch",
       value: HEX_COLOR_PATTERN.test(s.color) ? s.color.toLowerCase() : DEFAULT_ROUTINE_COLOR,
-      "aria-label": "Selector de color",
-      title: "Selector de color",
+      "aria-label": t("rt.form.ariaColor"),
+      title: t("rt.form.ariaColor"),
     });
     var colorText = ui.el("input", {
       id: "routine-color",
@@ -3974,30 +5046,30 @@ window.MiRutina = window.MiRutina || {};
       },
       [
         ui.el("div", { class: "rf-group" }, [
-          ui.el("p", { class: "rf-group-title", text: "Identidad" }),
-          ui.field({ label: "Nombre", control: nameInput, error: s.errors.name, required: true }),
-          ui.field({ label: "Descripción (opcional)", control: descriptionInput }),
-          ui.field({ label: "Color", control: colorRow, error: s.errors.color, required: true }),
+          ui.el("p", { class: "rf-group-title", text: t("rt.form.group.identity") }),
+          ui.field({ label: t("rt.form.label.name"), control: nameInput, error: s.errors.name, required: true }),
+          ui.field({ label: t("rt.form.label.description"), control: descriptionInput }),
+          ui.field({ label: t("rt.form.label.color"), control: colorRow, error: s.errors.color, required: true }),
         ]),
         ui.el("div", { class: "rf-group" }, [
-          ui.el("p", { class: "rf-group-title", text: "Horario" }),
+          ui.el("p", { class: "rf-group-title", text: t("rt.form.group.schedule") }),
           ui.field({
-            label: "Duración",
+            label: t("rt.form.label.duration"),
             control: durationRow,
             error: s.errors.duration,
-            hint: "Entre 1 minuto y 24 h.",
+            hint: t("rt.form.hint.duration"),
             required: true,
           }),
           buildWeekdayPicker(),
           freePanel,
         ]),
         ui.el("div", { class: "rf-group" }, [
-          ui.el("p", { class: "rf-group-title", text: "Estado" }),
+          ui.el("p", { class: "rf-group-title", text: t("rt.form.group.status") }),
           ui.el("div", {}, [
             ui.checkbox({
               id: "routine-active",
               name: "routine-active",
-              label: "Rutina activa",
+              label: t("rt.form.active"),
               checked: s.active,
               onChange: function (checked) {
                 formState.active = checked;
@@ -4006,9 +5078,7 @@ window.MiRutina = window.MiRutina || {};
             }),
             ui.el("p", {
               class: "rf-hint",
-              text:
-                "Al guardar, una rutina activa valida el límite de 24 h por día; " +
-                "desactivar siempre está permitido (solo afecta a días futuros).",
+              text: t("rt.form.activeHint"),
             }),
           ]),
         ]),
@@ -4016,12 +5086,12 @@ window.MiRutina = window.MiRutina || {};
         ui.el("div", { class: "rf-actions" }, [
           ui.el("button", { type: "submit", class: "btn btn-primary" }, [
             ui.icon("save", { size: 17 }),
-            "Guardar",
+            t("common.save"),
           ]),
           ui.el("button", {
             type: "button",
             class: "btn btn-ghost",
-            text: "Cancelar",
+            text: t("common.cancel"),
             onclick: function () {
               closeForm();
               rerender();
@@ -4059,7 +5129,7 @@ window.MiRutina = window.MiRutina || {};
       var box = ui.checkbox({
         id: "weekday-" + weekday,
         name: "weekday-" + weekday,
-        label: WEEKDAY_SHORT_LABELS[weekday],
+        label: weekdayShortLabel(weekday),
         checked: selected,
         onChange: function (checked) {
           if (checked) {
@@ -4083,7 +5153,7 @@ window.MiRutina = window.MiRutina || {};
         box.appendChild(
           ui.el("span", {
             class: "wd-day-free",
-            text: domain.formatDuration(free.actualFreeMinutes) + " libres",
+            text: t("rt.weekdays.free", { value: domain.formatDuration(free.actualFreeMinutes) }),
           })
         );
       }
@@ -4095,7 +5165,7 @@ window.MiRutina = window.MiRutina || {};
       ui.el("button", {
         type: "button",
         class: "btn btn-secondary btn-sm",
-        text: "Marcar todos",
+        text: t("rt.weekdays.markAll"),
         onclick: function () {
           formState.weekdays = domain.WEEKDAYS.slice();
           refreshFreePanel();
@@ -4105,7 +5175,7 @@ window.MiRutina = window.MiRutina || {};
       ui.el("button", {
         type: "button",
         class: "btn btn-ghost btn-sm",
-        text: "Desmarcar todos",
+        text: t("rt.weekdays.unmarkAll"),
         onclick: function () {
           formState.weekdays = [];
           refreshFreePanel();
@@ -4115,7 +5185,7 @@ window.MiRutina = window.MiRutina || {};
     ]);
 
     return ui.el("div", { class: "wd-group" }, [
-      ui.el("span", { class: "wd-legend", id: "wd-legend", text: "Días de la semana *" }),
+      ui.el("span", { class: "wd-legend", id: "wd-legend", text: t("rt.weekdays.legend") }),
       shortcuts,
       grid,
       errorNode,
@@ -4161,7 +5231,7 @@ window.MiRutina = window.MiRutina || {};
       errors.name = nameResult.message;
     }
     if (!HEX_COLOR_PATTERN.test(s.color)) {
-      errors.color = "Introduce un color en formato #RRGGBB.";
+      errors.color = t("rt.form.error.color");
     }
     var hoursNumber = Number(s.hours);
     var minutesNumber = Number(s.minutes);
@@ -4195,7 +5265,7 @@ window.MiRutina = window.MiRutina || {};
     );
     var candidate = {
       id: s.candidateId,
-      name: s.name.trim() || "Sin nombre",
+      name: s.name.trim() || t("common.unnamed"),
       description: s.description,
       color: s.color,
       durationMinutes: durationResult.ok ? durationResult.value : 0,
@@ -4223,9 +5293,9 @@ window.MiRutina = window.MiRutina || {};
     var list = ui.el("ul", { class: "ft-list", "aria-labelledby": "ft-title" });
     list.appendChild(
       ui.el("li", { class: "ft-row ft-row-head", "aria-hidden": "true" }, [
-        ui.el("span", { class: "ft-day", text: "Día" }),
-        ui.el("span", { class: "ft-cell", text: "Actual" }),
-        ui.el("span", { class: "ft-cell", text: "Propuesto" }),
+        ui.el("span", { class: "ft-day", text: t("common.day") }),
+        ui.el("span", { class: "ft-cell", text: t("common.current") }),
+        ui.el("span", { class: "ft-cell", text: t("common.proposed") }),
         ui.el("span", { class: "ft-delta", text: "Δ" }),
       ])
     );
@@ -4246,11 +5316,11 @@ window.MiRutina = window.MiRutina || {};
             ui.el("span", { class: "ft-day" }, [
               ui.el("span", {
                 class: "ft-day-full",
-                text: domain.WEEKDAY_LABELS[day.weekday],
+                text: i18n.weekdayLong(day.weekday),
               }),
               ui.el("span", {
                 class: "ft-day-short",
-                text: WEEKDAY_SHORT_LABELS[day.weekday],
+                text: weekdayShortLabel(day.weekday),
               }),
             ]),
             ui.el("span", {
@@ -4260,8 +5330,8 @@ window.MiRutina = window.MiRutina || {};
             exceeds
               ? ui.el("strong", {
                   class: "ft-exceeds",
-                  title: "Excede las 24 h del día",
-                  text: "excede",
+                  title: t("rt.free.exceedsTitle"),
+                  text: t("rt.free.exceeds"),
                 })
               : ui.el("strong", {
                   class: "ft-proposed",
@@ -4285,11 +5355,11 @@ window.MiRutina = window.MiRutina || {};
       ui.el("p", {
         class: "ft-title",
         id: "ft-title",
-        text: "Tiempo libre por día",
+        text: t("rt.free.title"),
       }),
       ui.el("p", {
         class: "ft-hint",
-        text: "Actual → con la propuesta. En rojo, los días que excederían 24 h.",
+        text: t("rt.free.hint"),
       }),
       list,
     ]);
@@ -4297,7 +5367,7 @@ window.MiRutina = window.MiRutina || {};
 
   /** Duración compacta para deltas: "30m" por debajo de 1 h, "2h 30m" si no. */
   function formatDeltaDuration(minutes) {
-    return minutes < 60 ? minutes + "m" : domain.formatDuration(minutes);
+    return i18n.deltaDuration(minutes);
   }
 
   /** Envía el formulario: valida junto al campo; los fallos se muestran en línea. */
@@ -4365,7 +5435,7 @@ window.MiRutina = window.MiRutina || {};
     // también al editar/activar; una rutina inactiva no ocupa días.
     var exceeded = domain.checkDailyLimit(routines, routine);
     if (exceeded.length > 0) {
-      return { ok: false, message: "No se puede guardar: " + describeExceededDays(exceeded) + "." };
+      return { ok: false, message: t("rt.exceeded", { days: describeExceededDays(exceeded) }) };
     }
     return { ok: true, message: "" };
   }
@@ -4374,12 +5444,10 @@ window.MiRutina = window.MiRutina || {};
   function describeExceededDays(exceeded) {
     return exceeded
       .map(function (day) {
-        return (
-          domain.WEEKDAY_LABELS[day.weekday] +
-          " (+" +
-          domain.formatDuration(day.excessMinutes) +
-          ")"
-        );
+        return t("rt.exceededDay", {
+          day: i18n.weekdayLong(day.weekday),
+          duration: domain.formatDuration(day.excessMinutes),
+        });
       })
       .join(", ");
   }
@@ -4390,7 +5458,7 @@ window.MiRutina = window.MiRutina || {};
     if (!saved.ok) {
       return {
         ok: false,
-        message: "No se pudo guardar: " + saved.error.message,
+        message: t("rt.saveFailed", { message: saved.error.message }),
         error: saved.error,
       };
     }
@@ -4417,13 +5485,13 @@ window.MiRutina = window.MiRutina || {};
     if (!result.ok) {
       return result;
     }
-    return { ok: true, message: "Rutina «" + routine.name + "» creada." };
+    return { ok: true, message: t("rt.created", { name: routine.name }) };
   }
 
   function updateRoutine(id, input) {
     var previous = findRoutine(id);
     if (!previous) {
-      return { ok: false, message: "La rutina ya no existe." };
+      return { ok: false, message: t("rt.missing") };
     }
     var routine = {
       id: previous.id,
@@ -4446,7 +5514,7 @@ window.MiRutina = window.MiRutina || {};
     if (!result.ok) {
       return result;
     }
-    return { ok: true, message: "Rutina «" + routine.name + "» actualizada." };
+    return { ok: true, message: t("rt.updated", { name: routine.name }) };
   }
 
   /**
@@ -4456,12 +5524,12 @@ window.MiRutina = window.MiRutina || {};
   function setRoutineActive(id, active) {
     var previous = findRoutine(id);
     if (!previous) {
-      return { ok: false, message: "La rutina ya no existe." };
+      return { ok: false, message: t("rt.missing") };
     }
     if (previous.active === active) {
       return {
         ok: true,
-        message: active ? "La rutina ya estaba activa." : "La rutina ya estaba desactivada.",
+        message: t(active ? "rt.alreadyActive" : "rt.alreadyInactive"),
       };
     }
     var routine = Object.assign({}, previous, { active: active });
@@ -4471,8 +5539,10 @@ window.MiRutina = window.MiRutina || {};
       if (exceeded.length > 0) {
         return {
           ok: false,
-          message:
-            "No se puede activar «" + routine.name + "»: " + describeExceededDays(exceeded) + ".",
+          message: t("rt.activateBlocked", {
+            name: routine.name,
+            days: describeExceededDays(exceeded),
+          }),
         };
       }
     }
@@ -4483,7 +5553,7 @@ window.MiRutina = window.MiRutina || {};
     if (!result.ok) {
       return result;
     }
-    return { ok: true, message: "«" + routine.name + "» " + (active ? "activada." : "desactivada.") };
+    return { ok: true, message: t(active ? "rt.activated" : "rt.deactivated", { name: routine.name }) };
   }
 
   /**
@@ -4494,7 +5564,7 @@ window.MiRutina = window.MiRutina || {};
   function deleteRoutine(id) {
     var routine = findRoutine(id);
     if (!routine) {
-      return { ok: false, message: "La rutina ya no existe." };
+      return { ok: false, message: t("rt.missing") };
     }
     var nextRoutines = state.routines.filter(function (item) {
       return item.id !== id;
@@ -4515,39 +5585,41 @@ window.MiRutina = window.MiRutina || {};
     var savedRoutines = storage.saveCollection("routines", nextRoutines);
     if (!savedRoutines.ok) {
       notifyWriteError(savedRoutines);
-      return { ok: false, message: "No se pudo eliminar: " + savedRoutines.error.message };
+      return { ok: false, message: t("rt.deleteFailed", { message: savedRoutines.error.message }) };
     }
     var savedEntries = storage.saveCollection("completions", nextEntries);
     if (!savedEntries.ok) {
       storage.saveCollection("routines", state.routines);
       notifyWriteError(savedEntries);
-      return { ok: false, message: "No se pudo eliminar: " + savedEntries.error.message };
+      return { ok: false, message: t("rt.deleteFailed", { message: savedEntries.error.message }) };
     }
     var savedGoals = storage.saveCollection("goals", nextGoals);
     if (!savedGoals.ok) {
       storage.saveCollection("completions", state.entries);
       storage.saveCollection("routines", state.routines);
       notifyWriteError(savedGoals);
-      return { ok: false, message: "No se pudo eliminar: " + savedGoals.error.message };
+      return { ok: false, message: t("rt.deleteFailed", { message: savedGoals.error.message }) };
     }
     state.routines = nextRoutines;
     state.entries = nextEntries;
     state.goals = nextGoals;
-    return { ok: true, message: "Rutina «" + routine.name + "» eliminada con sus registros." };
+    return { ok: true, message: t("rt.deleted", { name: routine.name }) };
   }
 
   // ---- Arranque ------------------------------------------------------------
 
   function init() {
     reloadState();
+    // Idioma persistido antes de cualquier texto: toasts, banners y navbar.
+    i18n.setLocale(state.lang);
     applyTheme(state.theme);
     notifyStartupIssues();
+    syncBackupBanner();
     bindNavbar();
+    // Navbar estática, pie y pill del idioma.
+    bindLanguageSwitcher();
+    syncLanguageUi();
     render();
-
-    // Footer con el año actual.
-    var footerYear = document.getElementById("footer-year");
-    if (footerYear) footerYear.textContent = String(new Date().getFullYear());
 
     window.addEventListener("hashchange", onHashChange);
     window.addEventListener("focus", onVisibleOrFocus);
@@ -4563,6 +5635,13 @@ window.MiRutina = window.MiRutina || {};
     toggleRoutine: toggleRoutine,
     setAll: setAll,
     saveNote: saveNote,
+    toggleShield: toggleShield,
+    toggleFocusMode: toggleFocusMode,
+    toggleFocusPick: toggleFocusPick,
+    selectCalendarDate: selectCalendarDate,
+    syncBackupBanner: syncBackupBanner,
+    dismissBackupReminder: dismissBackupReminder,
+    backupReminderAge: backupReminderAge,
     NOTE_MAX_LENGTH: NOTE_MAX_LENGTH,
     toggleTheme: toggleTheme,
     checkMidnight: checkMidnight,
