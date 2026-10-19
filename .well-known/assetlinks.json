@@ -1,0 +1,8 @@
+[{
+      "relation": ["delegate_permission/common.handle_all_urls"],
+      "target": {
+        "namespace": "android_app",
+        "package_name": "com.mirutina.app",
+        "sha256_cert_fingerprints": ["6C:6E:B5:97:CE:57:90:6B:95:EB:78:34:90:F1:DA:2C:56:F0:C0:CC:8B:DD:1E:90:03:28:4A:75:D6:53:50:53"]
+      }
+    }]
